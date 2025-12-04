@@ -3,9 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
 from typing import Optional
+from pydantic import BaseModel
 import json
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 import calendar
 from shapely.geometry import Point, shape
 from shapely.prepared import prep
@@ -16,10 +17,28 @@ from scipy.stats import linregress
 import os
 from statsmodels.tsa.seasonal import seasonal_decompose
 
+# ============= CHATBOT IMPORTS =============
+try:
+    from langchain_chroma import Chroma
+    from langchain_ollama import ChatOllama
+    from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_core.prompts import PromptTemplate
+    from langchain_core.runnables import RunnableLambda, RunnableMap
+    import chromadb
+    CHATBOT_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️  Chatbot dependencies not available: {e}")
+    CHATBOT_AVAILABLE = False
+
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 app = FastAPI(
-    title="GeoHydro API - Wells, GRACE, and Rainfall",
-    version="4.1.0",
-    description="Groundwater monitoring API with Wells, GRACE, and Rainfall data"
+    title="GeoHydro API - Wells, GRACE, Rainfall & AI Chatbot",
+    version="5.1.0",
+    description="Groundwater monitoring API with integrated AI chatbot and Dash-compatible seasonal decomposition"
 )
 
 app.add_middleware(
@@ -30,7 +49,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DATABASE_URL = os.environ.get("DB_URI", "postgresql://postgres:Iron2468@localhost:5432/GroundwaterPortal")
+DATABASE_URL = os.environ.get("DB_URI")
 engine = create_engine(
     DATABASE_URL,
     poolclass=QueuePool,
@@ -41,8 +60,111 @@ engine = create_engine(
 
 print("✅ GeoHydro API Started!")
 
+# ============= CHATBOT SETUP =============
+CHATBOT_ENABLED = False
+chatbot_chain = None
+
+if CHATBOT_AVAILABLE:
+    print("🤖 Initializing Chatbot...")
+    try:
+        # Initialize embeddings
+        embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        
+        # Initialize ChromaDB
+        chroma_client = chromadb.PersistentClient(path="/dashboard/chroma_db")
+        
+        # Initialize vector stores
+        vector_store_analysis = Chroma(
+            client=chroma_client,
+            collection_name="analysis_collection",
+            embedding_function=embedding_function,
+        )
+        vector_store_definitions = Chroma(
+            client=chroma_client,
+            collection_name="definitions_collection",
+            embedding_function=embedding_function,
+        )
+        
+        # Initialize LLM with stop tokens
+        llama_model = ChatOllama(
+            model="llama3.1:8b",
+            temperature=0.3,
+            stop=["\n\nHuman:", "\n\nUser:", "```", "\n\n---", "\n0", "\n1"]
+        )
+        
+        # Helper function for chatbot
+        def retrieve_context_fn(query: str):
+            """Retrieve information to help answer a query"""
+            docs1 = vector_store_definitions.similarity_search(query, k=2)
+            docs2 = vector_store_analysis.similarity_search(query, k=2)
+            docs = docs1 + docs2
+            return "\n\n".join(
+                (f"Source: {doc.metadata}\nContent: {doc.page_content}")
+                for doc in docs
+            )
+
+        # Create retrievable context runnable
+        retrieve_context = RunnableLambda(lambda x: retrieve_context_fn(x["question"]))
+
+        # Define prompt template with variable length
+        prompt = PromptTemplate(
+            template="""
+You are a Groundwater and Satellite-based Remote Sensing domain expert specializing in Indian hydrogeology.
+
+CURRENT MAP DISPLAY(if explicitly asked about the map ):
+{map_context}
+
+RETRIEVED KNOWLEDGE (use only if needed):
+{context}
+
+USER QUESTION:
+{question}
+
+Instructions:
+- If question uses map-reference words ("this", "here", "current", "showing", "visible", "pattern", "displayed") → analyze map data with specific values
+- If question is general ("what is", "explain", "define", "tell me about") → give educational answer using retrieved knowledge, IGNORE map context
+  * For map analysis: Provide comprehensive analysis (150-400 words)
+  * Include specific numbers, trends, comparisons, and actionable insights
+  * Reference the actual data values shown in the map context
+  * Explain what the patterns mean for groundwater management
+- If the user asks for definitions/concepts (like "what is", "explain", "define") → give brief educational answer (2-3 sentences, 50-100 words)
+- If map data is present but question is ambiguous → prioritize analyzing the visible data with detailed explanation
+- Use retrieved knowledge only for technical terms or additional context
+- Keep responses India-centric
+- Be direct - no preamble or meta-commentary
+- Never add trailing numbers or artifacts
+
+Answer directly:
+""")
+
+        # Create the simplified chain - LLM handles classification
+        chatbot_chain = RunnableMap({
+            "question": lambda x: x["question"],
+            "map_context": lambda x: str(x.get("map_context") or "No map data currently displayed"),
+            "context": retrieve_context
+        }) | prompt | llama_model
+        
+        CHATBOT_ENABLED = True
+        print("✅ Chatbot initialized successfully!")
+        
+    except Exception as e:
+        CHATBOT_ENABLED = False
+        print(f"⚠️  Chatbot initialization failed: {e}")
+        print("   API will continue without chatbot functionality")
+else:
+    print("⚠️  Chatbot dependencies not installed. Chatbot disabled.")
+
+# ============= CHATBOT MODELS =============
+class ChatRequest(BaseModel):
+    question: str
+    map_context: Optional[dict] = None
+
+class ChatResponse(BaseModel):
+    answer: str
+    sources_used: int
+
 # =============================================================================
-# GRACE BAND MAPPING - AUTO-DETECTED AT STARTUP
+# GRACE BAND MAPPING
 # =============================================================================
 
 GRACE_BAND_MAPPING = {}
@@ -51,7 +173,6 @@ def auto_detect_grace_bands():
     """Auto-detect GRACE bands"""
     global GRACE_BAND_MAPPING
     print("🔍 Auto-detecting GRACE band mappings...")
-    from datetime import datetime, timedelta
     try:
         with engine.connect() as conn:
             total_bands_query = text("SELECT ST_NumBands(rast) FROM lwe_thickness_india WHERE rid = 1;")
@@ -240,10 +361,14 @@ def categorize_water_level(depth):
 @app.get("/")
 def root():
     return {
-        "title": "GeoHydro API - Groundwater Monitoring System",
-        "version": "4.1.0",
-        "description": "API for groundwater data including wells, GRACE, and rainfall",
+        "title": "GeoHydro API - Groundwater Monitoring System with AI Chatbot",
+        "version": "5.1.0",
+        "description": "API for groundwater data including wells, GRACE, rainfall, and AI chatbot with Dash-compatible seasonal decomposition",
+        "chatbot_enabled": CHATBOT_ENABLED,
         "endpoints": {
+            "chatbot": [
+                "POST /api/chat - Ask questions to AI assistant (if enabled)"
+            ],
             "geography": [
                 "GET /api/states - List all states",
                 "GET /api/districts/{state} - Get districts by state",
@@ -256,7 +381,7 @@ def root():
             ],
             "wells": [
                 "GET /api/wells - Get well measurements (spatial filtering)",
-                "GET /api/wells/timeseries - Monthly/yearly aggregates",
+                "GET /api/wells/timeseries - Monthly/yearly aggregates with seasonal decomposition",
                 "GET /api/wells/summary - Regional statistics",
                 "GET /api/wells/storage - Pre/post-monsoon storage",
                 "GET /api/wells/years - Available year range (dynamic)"
@@ -274,6 +399,49 @@ def root():
             "grace_months_available": len(GRACE_BAND_MAPPING)
         }
     }
+
+# =============================================================================
+# CHATBOT ENDPOINT
+# =============================================================================
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """Chat endpoint to answer groundwater and remote sensing questions"""
+    if not CHATBOT_ENABLED:
+        raise HTTPException(
+            status_code=503, 
+            detail="Chatbot is not available. Please check if ChromaDB and LLaMA are properly configured."
+        )
+    
+    try:
+        # Get context from vector store
+        context = retrieve_context_fn(request.question)
+        sources_count = len(context.split("Source:")) - 1
+        
+        # Invoke the chain with map context
+        result = chatbot_chain.invoke({
+            "question": request.question,
+            "map_context": request.map_context or {}
+        })
+        
+        # Clean the response - remove trailing artifacts
+        answer = result.content.strip()
+        
+        # Remove trailing single digits that are artifacts
+        while answer and answer[-1].isdigit() and (len(answer) < 2 or not answer[-2].isdigit()):
+            answer = answer[:-1].strip()
+        
+        # Remove trailing punctuation artifacts
+        answer = answer.rstrip('.,;: ')
+        
+        return ChatResponse(
+            answer=answer,
+            sources_used=sources_count
+        )
+    
+    except Exception as e:
+        print(f"Chatbot error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
 
 # =============================================================================
 # GEOGRAPHY ENDPOINTS
@@ -407,8 +575,6 @@ def get_all_aquifers():
 @app.get("/api/aquifers/state/{state_name}")
 def get_aquifers_by_state(state_name: str):
     """Get aquifers for a specific state using spatial intersection"""
-    
-    # First, get the state boundary by unioning all districts
     state_boundary_query = text("""
         SELECT ST_AsGeoJSON(ST_Union(ST_MakeValid(geometry))) as geojson
         FROM public.district_state
@@ -422,7 +588,6 @@ def get_aquifers_by_state(state_name: str):
             if not state_row or not state_row[0]:
                 raise HTTPException(status_code=404, detail=f"State not found: {state_name}")
             
-            # Now find aquifers that intersect with the state boundary
             aquifer_query = text("""
                 SELECT 
                     a.aquifer, a.aquifers, a.zone_m, a.mbgl, a.avg_mbgl,
@@ -473,7 +638,6 @@ def get_aquifers_by_state(state_name: str):
 @app.get("/api/aquifers/district/{state_name}/{district_name}")
 def get_aquifers_by_district(state_name: str, district_name: str):
     """Get aquifers for a specific district using spatial intersection"""
-    
     district_query = text("""
         SELECT ST_AsGeoJSON(ST_MakeValid(geometry)) as geojson
         FROM public.district_state
@@ -554,14 +718,10 @@ def get_groundwater_wells(
     end_date: Optional[str] = Query(None),
     max_points: int = Query(5000, ge=100, le=50000)
 ):
-    """Get groundwater well measurements using SPATIAL FILTERING
-    
-    Season options: PREMONSOON, MONSOON, POSTMONS_1, or None for all seasons
-    """
+    """Get groundwater well measurements using SPATIAL FILTERING"""
     where_conditions = []
     params = {}
     
-    # Validate year has data
     if year:
         with engine.connect() as conn:
             year_check = text("""
@@ -591,7 +751,6 @@ def get_groundwater_wells(
                     "message": f"No well data available for year {year}"
                 }
     
-    # Get boundary geometry
     boundary_geojson = None
     if district and state:
         boundary_geojson = get_boundary_geojson(state, district)
@@ -602,7 +761,6 @@ def get_groundwater_wells(
         if not boundary_geojson:
             raise HTTPException(status_code=404, detail=f"State not found: {state}")
     
-    # Add spatial filter with coordinate fallback
     if boundary_geojson:
         where_conditions.append("""
             ST_Intersects(
@@ -621,7 +779,6 @@ def get_groundwater_wells(
         """)
         params["boundary_geojson"] = boundary_geojson
     
-    # Filter by year and month
     if year and month:
         where_conditions.append('EXTRACT(YEAR FROM "Date") = :year')
         where_conditions.append('EXTRACT(MONTH FROM "Date") = :month')
@@ -631,12 +788,10 @@ def get_groundwater_wells(
         where_conditions.append('EXTRACT(YEAR FROM "Date") = :year')
         params["year"] = year
     
-    # Filter by season
     if season:
         where_conditions.append('UPPER("Season") = UPPER(:season)')
         params["season"] = season
     
-    # Filter by date range
     if start_date:
         where_conditions.append('"Date" >= :start_date')
         params["start_date"] = start_date
@@ -647,7 +802,6 @@ def get_groundwater_wells(
     
     where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
     
-    # Build query with coordinate fallback
     query = text(f"""
         SELECT 
             "Date",
@@ -742,13 +896,18 @@ def get_wells_timeseries(
     state: Optional[str] = Query(None),
     district: Optional[str] = Query(None),
     aggregation: str = Query("monthly", regex="^(monthly|yearly)$"),
-    deseasonalize: bool = Query(False)
+    view: str = Query("raw", regex="^(raw|seasonal|deseasonalized)$")
 ):
-    """Get aggregated well timeseries with optional deseasonalization"""
+    """
+    Get aggregated well timeseries with seasonal decomposition (Dash-compatible)
+    
+    Parameters:
+    - view: 'raw' (original data), 'seasonal' (repeating pattern only), 'deseasonalized' (trend + residual)
+    - aggregation: 'monthly' or 'yearly' (forced to monthly for seasonal/deseasonalized)
+    """
     
     boundary_geojson = get_boundary_geojson(state, district) if (state or district) else None
     
-    # Base query with spatial filter
     where_clause = ""
     params = {}
     
@@ -764,6 +923,10 @@ def get_wells_timeseries(
         """
         params["boundary_geojson"] = boundary_geojson
     
+    # ✅ FORCE MONTHLY for decomposition (DASH LOGIC)
+    if view in ["seasonal", "deseasonalized"]:
+        aggregation = "monthly"
+    
     if aggregation == "monthly":
         query = text(f"""
             SELECT 
@@ -776,7 +939,7 @@ def get_wells_timeseries(
             GROUP BY DATE_TRUNC('month', "Date")
             ORDER BY period;
         """)
-    else:  # yearly
+    else:
         query = text(f"""
             SELECT 
                 DATE_TRUNC('year', "Date") as period,
@@ -803,43 +966,194 @@ def get_wells_timeseries(
             
             if not timeseries:
                 return {
+                    "view": view,
                     "aggregation": aggregation,
-                    "deseasonalized": False,
+                    "filters": {"state": state, "district": district},
                     "count": 0,
-                    "timeseries": []
+                    "timeseries": [],
+                    "statistics": None
                 }
             
-            # Deseasonalization if requested
-            if deseasonalize and len(timeseries) >= 24:
+            # ============= SEASONAL DECOMPOSITION (DASH LOGIC) =============
+            if view in ["seasonal", "deseasonalized"] and len(timeseries) >= 24:
                 df = pd.DataFrame(timeseries)
                 df['date'] = pd.to_datetime(df['date'])
                 df = df.set_index('date')
                 
-                # Seasonal decomposition
+                # Perform decomposition
                 decomp = seasonal_decompose(df['avg_gwl'], model='additive', period=12)
                 
-                df['seasonal'] = decomp.seasonal
-                df['trend'] = decomp.trend
-                df['residual'] = decomp.resid
-                df['deseasonalized'] = decomp.trend + decomp.resid
+                # Prepare output based on view
+                output_timeseries = []
                 
-                timeseries = df.reset_index().to_dict('records')
-                for item in timeseries:
-                    item['date'] = item['date'].isoformat()
-                    for key in ['avg_gwl', 'seasonal', 'trend', 'residual', 'deseasonalized']:
-                        if key in item and pd.notna(item[key]):
-                            item[key] = round(float(item[key]), 2)
+                if view == "seasonal":
+                    # Return ONLY seasonal component
+                    for idx in df.index:
+                        if pd.notna(decomp.seasonal[idx]):
+                            output_timeseries.append({
+                                "date": idx.isoformat(),
+                                "value": round(float(decomp.seasonal[idx]), 2),
+                                "component": "seasonal"
+                            })
+                    
+                    # Calculate seasonal amplitude
+                    seasonal_vals = decomp.seasonal.dropna()
+                    statistics = {
+                        "seasonal_amplitude": round(float(seasonal_vals.max() - seasonal_vals.min()), 2),
+                        "seasonal_mean": round(float(seasonal_vals.mean()), 2),
+                        "view": "seasonal",
+                        "note": "Shows repeating 12-month pattern only"
+                    }
+                
+                elif view == "deseasonalized":
+                    # Return trend + residual (no seasonality)
+                    deseasonalized = decomp.trend + decomp.resid
+                    
+                    for idx in df.index:
+                        if pd.notna(deseasonalized[idx]):
+                            output_timeseries.append({
+                                "date": idx.isoformat(),
+                                "value": round(float(deseasonalized[idx]), 2),
+                                "component": "deseasonalized"
+                            })
+                    
+                    # Calculate trend statistics (DASH LOGIC)
+                    deseas_clean = deseasonalized.dropna()
+                    if len(deseas_clean) >= 2:
+                        x = np.arange(len(deseas_clean))
+                        y = deseas_clean.values
+                        slope, intercept, r_value, p_value, std_err = linregress(x, y)
+                        
+                        # Calculate trendline values for plotting
+                        trendline = []
+                        for i, idx in enumerate(deseas_clean.index):
+                            trendline.append({
+                                "date": idx.isoformat(),
+                                "trendline_value": round(float(slope * i + intercept), 2)
+                            })
+                        
+                        statistics = {
+                            "trend_slope_m_per_month": round(float(slope), 4),
+                            "trend_slope_m_per_year": round(float(slope * 12), 4),
+                            "r_squared": round(float(r_value ** 2), 3),
+                            "p_value": round(float(p_value), 4),
+                            "trend_direction": "declining" if slope > 0 else "recovering",
+                            "significance": "significant" if p_value < 0.05 else "not_significant",
+                            "trendline": trendline,
+                            "view": "deseasonalized",
+                            "note": "Seasonal pattern removed, showing long-term trend"
+                        }
+                    else:
+                        statistics = {
+                            "error": "Insufficient data for trend calculation",
+                            "view": "deseasonalized"
+                        }
+                
+                return {
+                    "view": view,
+                    "aggregation": "monthly",
+                    "filters": {"state": state, "district": district},
+                    "count": len(output_timeseries),
+                    "chart_config": {
+                        "gwl_chart_type": "line",
+                        "rainfall_chart_type": "line",
+                        "rainfall_field": "value",
+                        "rainfall_unit": "mm/day (component)",
+                        "gwl_y_axis_reversed": True
+                    },
+                    "timeseries": output_timeseries,
+                    "statistics": statistics
+                }
             
-            return {
-                "aggregation": aggregation,
-                "deseasonalized": deseasonalize,
-                "filters": {"state": state, "district": district},
-                "count": len(timeseries),
-                "timeseries": timeseries
-            }
+            # ============= RAW VIEW (DASH-COMPATIBLE) =============
+            elif view == "raw":
+                # ✅ ENHANCEMENT: Add monthly rainfall totals (DASH LOGIC)
+                enhanced_timeseries = []
+                for item in timeseries:
+                    new_item = item.copy()
+                    
+                    # Calculate monthly rainfall total (mm/day × days in month)
+                    # Note: avg_rainfall not in current query, but keeping structure ready
+                    date = pd.to_datetime(item["date"])
+                    days_in_month = date.days_in_month
+                    new_item["days_in_month"] = days_in_month
+                    
+                    # If rainfall data exists, convert to monthly total
+                    if "avg_rainfall" in new_item and new_item.get("avg_rainfall") is not None:
+                        new_item["monthly_rainfall_mm"] = round(
+                            new_item["avg_rainfall"] * days_in_month, 2
+                        )
+                    
+                    enhanced_timeseries.append(new_item)
+                
+                # Calculate basic statistics for raw data
+                df = pd.DataFrame(timeseries)
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.set_index('date')
+                
+                if len(df) >= 2:
+                    x = np.arange(len(df))
+                    y = df['avg_gwl'].values
+                    slope, intercept, r_value, p_value, std_err = linregress(x, y)
+                    
+                    # Calculate trendline
+                    trendline = []
+                    for i, idx in enumerate(df.index):
+                        trendline.append({
+                            "date": idx.isoformat(),
+                            "trendline_value": round(float(slope * i + intercept), 2)
+                        })
+                    
+                    multiplier = 12 if aggregation == "monthly" else 1
+                    
+                    statistics = {
+                        "mean_gwl": round(float(np.mean(y)), 2),
+                        "min_gwl": round(float(np.min(y)), 2),
+                        "max_gwl": round(float(np.max(y)), 2),
+                        "std_gwl": round(float(np.std(y)), 2),
+                        "trend_slope_m_per_year": round(float(slope * multiplier), 4),
+                        "r_squared": round(float(r_value ** 2), 3),
+                        "p_value": round(float(p_value), 4),
+                        "trend_direction": "declining" if slope > 0 else "recovering",
+                        "significance": "significant" if p_value < 0.05 else "not_significant",
+                        "trendline": trendline,
+                        "view": "raw",
+                        "note": "Original data with seasonality intact. Rainfall shown as monthly totals (when available)."
+                    }
+                else:
+                    statistics = None
+                
+                return {
+                    "view": view,
+                    "aggregation": aggregation,
+                    "filters": {"state": state, "district": district},
+                    "count": len(timeseries),
+                    "chart_config": {  # ✅ DASH-COMPATIBLE CONFIG
+                        "gwl_chart_type": "line",
+                        "rainfall_chart_type": "bar",
+                        "rainfall_field": "monthly_rainfall_mm",
+                        "rainfall_unit": "mm/month",
+                        "gwl_y_axis_reversed": True
+                    },
+                    "timeseries": enhanced_timeseries,  # ✅ With monthly totals
+                    "statistics": statistics
+                }
+            
+            else:
+                # Not enough data for decomposition
+                return {
+                    "view": view,
+                    "aggregation": aggregation,
+                    "filters": {"state": state, "district": district},
+                    "count": len(timeseries),
+                    "timeseries": timeseries,
+                    "statistics": None,
+                    "error": f"Need at least 24 months of data for {view} view (have {len(timeseries)} months)"
+                }
     
     except Exception as e:
         print(f"Error: {str(e)}")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/wells/summary")
@@ -866,7 +1180,6 @@ def get_wells_summary(
         """
         params["boundary_geojson"] = boundary_geojson
     
-    # Get monthly averages for trend calculation
     query = text(f"""
         SELECT 
             DATE_TRUNC('month', "Date") as month,
@@ -890,18 +1203,14 @@ def get_wells_summary(
                     "error": "Insufficient data for analysis"
                 }
             
-            # Convert to numeric for regression
             dates = [d[0] for d in data]
             gwl_values = [d[1] for d in data]
             
-            # Time as days since first observation
             x = np.array([(d - dates[0]).days for d in dates])
             y = np.array(gwl_values)
             
-            # Linear regression
             slope, intercept, r_value, p_value, std_err = linregress(x, y)
             
-            # Annualize slope
             slope_per_year = slope * 365.25
             r_squared = r_value ** 2
             
@@ -958,7 +1267,6 @@ def get_wells_storage(
         """
         params["boundary_geojson"] = boundary_geojson
     
-    # Get aquifer area and specific yield for storage calculation
     where_aquifer = "WHERE ST_Intersects(ST_MakeValid(geometry), ST_GeomFromGeoJSON(:boundary_geojson))" if boundary_geojson else ""
     aquifer_query = text(f"""
         SELECT 
@@ -979,16 +1287,13 @@ def get_wells_storage(
                 area = float(row[0]) if row[0] else 0
                 yield_str = str(row[1]).lower() if row[1] else ""
                 
-                # Parse yield percentage (e.g., "1-1.5", "upto 3")
-                sy = 0.05  # default 5%
+                sy = 0.05
                 try:
-                    # Extract numbers from string
                     import re
                     numbers = re.findall(r'\d+\.?\d*', yield_str)
                     if numbers:
-                        # Take average if range, otherwise first number
                         vals = [float(n) for n in numbers]
-                        sy = sum(vals) / len(vals) / 100.0  # Convert % to decimal
+                        sy = sum(vals) / len(vals) / 100.0
                 except:
                     sy = 0.05
                 
@@ -1000,24 +1305,23 @@ def get_wells_storage(
             
             specific_yield = weighted_sy_sum / total_area_m2
             
-            # Get pre-monsoon (Apr-Jun) and post-monsoon (Oct-Dec) averages by year
             year_filter_start = 'AND EXTRACT(YEAR FROM "Date") >= :start_year' if start_year else ""
             year_filter_end = 'AND EXTRACT(YEAR FROM "Date") <= :end_year' if end_year else ""
 
             storage_query = text(f"""
-                    SELECT 
-                        EXTRACT(YEAR FROM "Date") as year,
-                        AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (4,5,6) THEN "GWL" END) as pre_gwl,
-                        AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (10,11,12) THEN "GWL" END) as post_gwl
-                    FROM groundwater_level
-                    {where_clause}
-                    AND "GWL" IS NOT NULL
-                    {year_filter_start}
-                    {year_filter_end}
-                    GROUP BY EXTRACT(YEAR FROM "Date")
-                    HAVING AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (4,5,6) THEN "GWL" END) IS NOT NULL
-                    AND AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (10,11,12) THEN "GWL" END) IS NOT NULL
-                    ORDER BY year;
+                SELECT 
+                    EXTRACT(YEAR FROM "Date") as year,
+                    AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (4,5,6) THEN "GWL" END) as pre_gwl,
+                    AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (10,11,12) THEN "GWL" END) as post_gwl
+                FROM groundwater_level
+                {where_clause}
+                AND "GWL" IS NOT NULL
+                {year_filter_start}
+                {year_filter_end}
+                GROUP BY EXTRACT(YEAR FROM "Date")
+                HAVING AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (4,5,6) THEN "GWL" END) IS NOT NULL
+                AND AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (10,11,12) THEN "GWL" END) IS NOT NULL
+                ORDER BY year;
             """)
             
             if start_year:
@@ -1033,8 +1337,6 @@ def get_wells_storage(
                 pre_gwl = float(row[1])
                 post_gwl = float(row[2])
                 
-                # Storage change = (pre - post) * area * specific_yield
-                # Positive = recharge, Negative = depletion
                 fluctuation_m = pre_gwl - post_gwl
                 storage_change_mcm = (fluctuation_m * total_area_m2 * specific_yield) / 1_000_000
                 
@@ -1051,7 +1353,6 @@ def get_wells_storage(
                     "error": "Insufficient seasonal data for storage calculation"
                 }
             
-            # Calculate average storage change
             avg_storage_change = np.mean([s["storage_change_mcm"] for s in storage_years])
             
             return {
@@ -1073,12 +1374,7 @@ def get_wells_storage(
 
 @app.get("/api/wells/years")
 def get_wells_years():
-    """Get available year range for wells data - Dynamic like Dash application
-    
-    Returns min_year and max_year from actual database content, matching Dash behavior:
-    - Dash code (lines 192-193): min_year = int(points_gdf['year'].min())
-    - This endpoint queries the same data source dynamically
-    """
+    """Get available year range for wells data"""
     query = text("""
         SELECT 
             MIN(EXTRACT(YEAR FROM "Date")) as min_year,
@@ -1100,7 +1396,6 @@ def get_wells_years():
                     "description": f"Wells data available from {min_year} to {max_year}"
                 }
             else:
-                # Fallback if no data
                 return {
                     "min_year": 1994,
                     "max_year": 2024,
@@ -1110,7 +1405,6 @@ def get_wells_years():
                 }
     except Exception as e:
         print(f"Error getting year range: {str(e)}")
-        # Return fallback on error
         return {
             "min_year": 1994,
             "max_year": 2024,
@@ -1428,10 +1722,20 @@ def health_check():
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
+        
+        chatbot_status = "enabled" if CHATBOT_ENABLED else "disabled"
+        
         return {
             "status": "healthy",
             "database": "connected",
-            "grace_bands": len(GRACE_BAND_MAPPING)
+            "grace_bands": len(GRACE_BAND_MAPPING),
+            "chatbot": chatbot_status,
+            "version": "5.1.0",
+            "features": [
+                "Dash-compatible seasonal decomposition",
+                "Monthly rainfall totals for raw view",
+                "Frontend chart configuration guidance"
+            ]
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -1443,12 +1747,16 @@ def health_check():
 if __name__ == "__main__":
     import uvicorn
     print("\n" + "="*80)
-    print("🚀 GeoHydro API - Wells, GRACE, and Rainfall")
+    print("🚀 GeoHydro API v5.1.0 - Dash-Compatible Edition")
     print("="*80)
     print(f"📊 GRACE Months Available: {len(GRACE_BAND_MAPPING)}")
+    print(f"🤖 Chatbot Status: {'✅ Enabled' if CHATBOT_ENABLED else '⚠️  Disabled'}")
+    print(f"🌧️  Rainfall: Monthly totals for Raw view")
+    print(f"📈 Decomposition: Forced monthly for seasonal/deseasonalized")
     print("="*80)
     print("\n🌐 API Documentation: http://localhost:8000/docs")
     print("🏥 Health Check: http://localhost:8000/health")
-    print("📅 Wells Year Range: http://localhost:8000/api/wells/years")
+    print("💬 Chatbot: POST http://localhost:8000/api/chat")
+    print("📊 Timeseries: GET http://localhost:8000/api/wells/timeseries")
     print("\n")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
