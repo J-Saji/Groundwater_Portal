@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import axios from "axios";
 import dynamic from "next/dynamic";
 import "leaflet/dist/leaflet.css";
+
+// Add Plotly import
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
 // ✅ Lazy load React Leaflet components
 const MapContainer = dynamic(() => import("react-leaflet").then(m => m.MapContainer), { ssr: false });
@@ -71,14 +74,61 @@ interface WellPoint {
   hovertext: string;
 }
 
+// ============= UPDATED: Timeseries Interfaces with Rainfall =============
 interface TimeseriesPoint {
   date: string;
-  avg_gwl: number;
+  avg_gwl?: number;        // For raw view GWL
+  value?: number;          // For seasonal/deseasonalized GWL
+  avg_rainfall?: number;   // Raw rainfall (mm/day) - kept for reference
+  monthly_rainfall_mm?: number;  // ✅ NEW: Monthly rainfall total (mm/month)
+  days_in_month?: number;  // ✅ NEW: Days in month
+  count?: number;
+  component?: string;
+}
+
+interface TrendlinePoint {
+  date: string;
+  trendline_value: number;
+}
+
+interface ChartConfig {
+  gwl_chart_type: string;
+  rainfall_chart_type: string;
+  rainfall_field: string;
+  rainfall_unit: string;
+  gwl_y_axis_reversed: boolean;
+}
+
+interface TimeseriesStatistics {
+  mean_gwl?: number;
+  min_gwl?: number;
+  max_gwl?: number;
+  std_gwl?: number;
+  trend_slope_m_per_month?: number;
+  trend_slope_m_per_year: number;
+  r_squared: number;
+  p_value: number;
+  trend_direction: string;
+  significance: string;
+  trendline: TrendlinePoint[];
+  view: string;
+  note?: string;
+  seasonal_amplitude?: number;
+  seasonal_mean?: number;
+}
+
+interface TimeseriesResponse {
+  view: string;
+  aggregation: string;
+  filters: {
+    state: string | null;
+    district: string | null;
+  };
   count: number;
-  seasonal?: number;
-  trend?: number;
-  residual?: number;
-  deseasonalized?: number;
+  chart_config?: ChartConfig;  // ✅ NEW: Chart configuration from backend
+  timeseries: TimeseriesPoint[];
+  statistics: TimeseriesStatistics | null;
+  error?: string;
 }
 
 interface WellsSummary {
@@ -190,11 +240,40 @@ interface YearRangeResponse {
   max_year: number;
 }
 
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  sourcesUsed?: number;
+  timestamp: Date;
+}
+
+interface MapContext {
+  active_layers: string[];
+  region: {
+    state: string | null;
+    district: string | null;
+  };
+  temporal: {
+    year: number;
+    month: number | null;
+    season: string | null;
+  };
+  data_summary: {
+    [key: string]: any;
+  };
+}
+
 const COLOR_PALETTE = [
   "#E91E63", "#9C27B0", "#673AB7", "#3F51B5", "#2196F3", "#03A9F4",
   "#00BCD4", "#009688", "#4CAF50", "#8BC34A", "#CDDC39", "#FFEB3B",
   "#FFC107", "#FF9800", "#FF5722", "#795548", "#607D88", "#F44336",
 ];
+
+// ============= DASH-COMPATIBLE COLORS =============
+const GWL_COLOR = "#8D6E63";
+const RAIN_COLOR = "#1E88E5";
+const TREND_DECLINE_COLOR = "#DC2626";
+const TREND_RECOVER_COLOR = "#16A34A";
 
 const getAquiferColor = (aquiferType: string, index: number): string => {
   const type = aquiferType?.toLowerCase() || "";
@@ -251,12 +330,11 @@ export default function Home() {
   const [rainfallResponse, setRainfallResponse] = useState<RainfallResponse | null>(null);
   const [wellsResponse, setWellsResponse] = useState<WellsResponse | null>(null);
   
-  // ✅ NEW: Timeseries, Summary, Storage states
-  const [timeseriesData, setTimeseriesData] = useState<TimeseriesPoint[]>([]);
+  // ============= UPDATED: Timeseries State =============
+  const [timeseriesResponse, setTimeseriesResponse] = useState<TimeseriesResponse | null>(null);
   const [summaryData, setSummaryData] = useState<WellsSummary | null>(null);
   const [storageData, setStorageData] = useState<StorageResponse | null>(null);
   
-  // ✅ NEW: Dynamic year range state
   const [wellYearRange, setWellYearRange] = useState({ min: 1994, max: 2024 });
   
   const [selectedState, setSelectedState] = useState<string>("");
@@ -266,7 +344,6 @@ export default function Home() {
   const [showRainfall, setShowRainfall] = useState<boolean>(false);
   const [showWells, setShowWells] = useState<boolean>(false);
   
-  // ✅ NEW: Panel toggles
   const [showTimeseries, setShowTimeseries] = useState<boolean>(false);
   const [showSummary, setShowSummary] = useState<boolean>(false);
   const [showStorage, setShowStorage] = useState<boolean>(false);
@@ -281,13 +358,24 @@ export default function Home() {
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<string>("");
   
-  // ✅ NEW: Timeseries controls
-  const [aggregation, setAggregation] = useState<"monthly" | "yearly">("monthly");
-  const [deseasonalize, setDeseasonalize] = useState<boolean>(false);
+  // ============= UPDATED: View Selection =============
+  const [timeseriesView, setTimeseriesView] = useState<"raw" | "seasonal" | "deseasonalized">("raw");
 
   const [alertMessage, setAlertMessage] = useState<string>("");
   const [alertType, setAlertType] = useState<"info" | "warning" | "error" | "success">("info");
   const [isLoading, setIsLoading] = useState<boolean>(false);
+
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
+    {
+      role: "assistant",
+      content: "Hello! I'm your Groundwater and Remote Sensing expert. Ask me anything about GRACE data, rainfall patterns, groundwater levels, or aquifer systems!",
+      timestamp: new Date()
+    }
+  ]);
+  const [chatInput, setChatInput] = useState("");
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const backendURL = "http://127.0.0.1:8000";
 
@@ -297,6 +385,154 @@ export default function Home() {
     setTimeout(() => setAlertMessage(""), 5000);
   };
 
+  const buildMapContext = useCallback((): MapContext => {
+    const activeLayers: string[] = [];
+    if (showAquifers) activeLayers.push("aquifers");
+    if (showGrace) activeLayers.push("grace");
+    if (showRainfall) activeLayers.push("rainfall");
+    if (showWells) activeLayers.push("wells");
+
+    const dataSummary: any = {};
+
+    if (showAquifers && aquifers.length > 0) {
+      dataSummary.aquifers = {
+        count: aquifers.length,
+        types: Array.from(new Set(aquifers.map(a => a.aquifer))).slice(0, 3)
+      };
+    }
+
+    if (showGrace && graceResponse) {
+      dataSummary.grace = {
+        year: graceResponse.year,
+        month: graceResponse.month,
+        description: graceResponse.description,
+        regional_average_cm: graceResponse.regional_average_cm,
+        data_points: graceResponse.count,
+        status: graceResponse.status
+      };
+    }
+
+    if (showRainfall && rainfallResponse) {
+      dataSummary.rainfall = {
+        year: rainfallResponse.year,
+        month: rainfallResponse.month,
+        day: rainfallResponse.day,
+        description: rainfallResponse.description,
+        regional_average_mm_per_day: rainfallResponse.regional_average_mm_per_day,
+        data_points: rainfallResponse.count,
+        unit: rainfallResponse.unit
+      };
+    }
+
+    if (showWells && wellsResponse) {
+      const categories = wellsData.reduce((acc, w) => {
+        acc[w.gwl_category] = (acc[w.gwl_category] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+
+      dataSummary.wells = {
+        year: wellsResponse.filters.year,
+        month: wellsResponse.filters.month,
+        season: wellsResponse.filters.season,
+        data_points: wellsResponse.count,
+        categories: categories,
+        avg_gwl: wellsData.length > 0 
+          ? (wellsData.reduce((sum, w) => sum + w.gwl, 0) / wellsData.length).toFixed(2) 
+          : null
+      };
+    }
+
+    if (summaryData && !summaryData.error) {
+      dataSummary.summary = {
+        mean_gwl: summaryData.statistics.mean_gwl,
+        trend_direction: summaryData.trend.trend_direction,
+        slope_m_per_year: summaryData.trend.slope_m_per_year
+      };
+    }
+
+    return {
+      active_layers: activeLayers,
+      region: {
+        state: selectedState || null,
+        district: selectedDistrict || null
+      },
+      temporal: {
+        year: selectedYear,
+        month: selectedMonth,
+        season: selectedSeason || null
+      },
+      data_summary: dataSummary
+    };
+  }, [
+    showAquifers, showGrace, showRainfall, showWells,
+    aquifers, graceResponse, rainfallResponse, wellsResponse, wellsData,
+    summaryData, selectedState, selectedDistrict, selectedYear, selectedMonth, selectedSeason
+  ]);
+
+  const scrollChatToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollChatToBottom();
+  }, [chatMessages]);
+
+  const handleSendMessage = async () => {
+    if (!chatInput.trim() || isChatLoading) return;
+
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: chatInput,
+      timestamp: new Date()
+    };
+
+    setChatMessages(prev => [...prev, userMessage]);
+    setChatInput("");
+    setIsChatLoading(true);
+
+    try {
+      const mapContext = buildMapContext();
+      
+      const response = await axios.post(`${backendURL}/api/chat`, {
+        question: chatInput,
+        map_context: mapContext
+      });
+
+      const assistantMessage: ChatMessage = {
+        role: "assistant",
+        content: response.data.answer,
+        sourcesUsed: response.data.sources_used,
+        timestamp: new Date()
+      };
+
+      setChatMessages(prev => [...prev, assistantMessage]);
+    } catch (error) {
+      console.error("Error sending message:", error);
+      const errorMessage: ChatMessage = {
+        role: "assistant",
+        content: "Sorry, I encountered an error. Please make sure the chatbot is enabled in the backend.",
+        timestamp: new Date()
+      };
+      setChatMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsChatLoading(false);
+    }
+  };
+
+  const handleChatKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  };
+
+  const suggestedQuestions = [
+    "What is GRACE satellite data?",
+    "Explain groundwater depletion in India",
+    "What patterns do you see in this map?",
+    "Analyze the current data displayed"
+  ];
+
   const activeLayers = [
     { id: 'aquifers', name: 'Aquifers', icon: '🔷', show: showAquifers, color: 'purple' },
     { id: 'grace', name: 'GRACE', icon: '🌊', show: showGrace, color: 'green' },
@@ -304,28 +540,23 @@ export default function Home() {
     { id: 'wells', name: 'Wells', icon: '💧', show: showWells, color: 'red' }
   ].filter(layer => layer.show);
 
-  // ✅ NEW: Fetch dynamic year range on mount
   useEffect(() => {
     axios.get<YearRangeResponse>(`${backendURL}/api/wells/years`)
       .then(res => {
         setWellYearRange({ min: res.data.min_year, max: res.data.max_year });
-        // Set initial year to most recent available
         setSelectedYear(res.data.max_year);
       })
       .catch(() => {
-        // Fallback to hardcoded range
         setWellYearRange({ min: 1994, max: 2024 });
       });
   }, []);
 
-  // Load states
   useEffect(() => {
     axios.get<StateType[]>(`${backendURL}/api/states`)
       .then(res => setStates(res.data))
       .catch(err => showAlert("Error loading states", "error"));
   }, []);
 
-  // Load districts
   useEffect(() => {
     if (!selectedState) {
       setDistricts([]);
@@ -356,7 +587,6 @@ export default function Home() {
       .finally(() => setIsLoading(false));
   }, [selectedState]);
 
-  // Load district boundary
   useEffect(() => {
     if (!selectedDistrict || !selectedState) {
       if (selectedState && !selectedDistrict) {
@@ -379,7 +609,6 @@ export default function Home() {
       .finally(() => setIsLoading(false));
   }, [selectedDistrict, selectedState]);
 
-  // Load aquifers
   useEffect(() => {
     if (!showAquifers) {
       setAquifers([]);
@@ -406,7 +635,6 @@ export default function Home() {
     }
   }, [showAquifers, selectedState, selectedDistrict]);
 
-  // Load GRACE
   useEffect(() => {
     if (!showGrace) {
       setGraceData([]);
@@ -436,7 +664,6 @@ export default function Home() {
       .finally(() => setIsLoading(false));
   }, [showGrace, selectedYear, selectedMonth, selectedState, selectedDistrict]);
 
-  // Load Rainfall
   useEffect(() => {
     if (!showRainfall) {
       setRainfallData([]);
@@ -462,7 +689,6 @@ export default function Home() {
       .finally(() => setIsLoading(false));
   }, [showRainfall, selectedYear, selectedMonth, selectedDay, selectedState, selectedDistrict]);
 
-  // Load Wells
   useEffect(() => {
     if (!showWells) {
       setWellsData([]);
@@ -486,27 +712,26 @@ export default function Home() {
       .finally(() => setIsLoading(false));
   }, [showWells, selectedYear, selectedMonth, selectedSeason, selectedState, selectedDistrict]);
 
-  // ✅ NEW: Load Timeseries
+  // ============= UPDATED: Timeseries Effect =============
   useEffect(() => {
     if (!showTimeseries) {
-      setTimeseriesData([]);
+      setTimeseriesResponse(null);
       return;
     }
     setIsLoading(true);
-    const params: any = { aggregation, deseasonalize };
+    const params: any = { view: timeseriesView };
     if (selectedState) params.state = selectedState;
     if (selectedDistrict) params.district = selectedDistrict;
 
-    axios.get(`${backendURL}/api/wells/timeseries`, { params })
+    axios.get<TimeseriesResponse>(`${backendURL}/api/wells/timeseries`, { params })
       .then(res => {
-        setTimeseriesData(res.data.timeseries);
-        showAlert(`Loaded ${res.data.count} time points`, "success");
+        setTimeseriesResponse(res.data);
+        showAlert(`Loaded ${res.data.count} time points (${res.data.view} view)`, "success");
       })
       .catch(err => showAlert("Error loading timeseries", "error"))
       .finally(() => setIsLoading(false));
-  }, [showTimeseries, aggregation, deseasonalize, selectedState, selectedDistrict]);
+  }, [showTimeseries, timeseriesView, selectedState, selectedDistrict]);
 
-  // ✅ NEW: Load Summary
   useEffect(() => {
     if (!showSummary) {
       setSummaryData(null);
@@ -526,7 +751,6 @@ export default function Home() {
       .finally(() => setIsLoading(false));
   }, [showSummary, selectedState, selectedDistrict]);
 
-  // ✅ NEW: Load Storage
   useEffect(() => {
     if (!showStorage) {
       setStorageData(null);
@@ -572,13 +796,12 @@ export default function Home() {
 
   const uniqueWellCategories = Array.from(new Set(wellsData.map(w => w.gwl_category))).map(cat => ({ category: cat, color: getWellColor(cat) }));
 
-  // ✅ UPDATED: Dynamic year ranges
-  const graceYears = Array.from({ length: 24 }, (_, i) => 2002 + i); // GRACE: 2002-2025
-  const rainfallYears = Array.from({ length: 31 }, (_, i) => 1994 + i); // Rainfall: 1994-2024
+  const graceYears = Array.from({ length: 24 }, (_, i) => 2002 + i);
+  const rainfallYears = Array.from({ length: 31 }, (_, i) => 1994 + i);
   const wellYears = Array.from(
     { length: wellYearRange.max - wellYearRange.min + 1 }, 
     (_, i) => wellYearRange.min + i
-  ); // Wells: Dynamic based on actual data
+  );
   
   const availableYears = showGrace ? graceYears : (showWells ? wellYears : rainfallYears);
 
@@ -790,7 +1013,7 @@ export default function Home() {
             </div>
             <div>
               <h1 className="text-2xl font-bold text-gray-800">GeoHydro Dashboard</h1>
-              <p className="text-sm text-gray-500">Multi-layer Hydrogeological Analysis Platform</p>
+              <p className="text-sm text-gray-500">Multi-layer Hydrogeological Analysis Platform with AI Assistant</p>
             </div>
           </div>
 
@@ -922,7 +1145,6 @@ export default function Home() {
             </div>
           </div>
 
-          {/* ✅ Analysis Buttons Row */}
           <div className="flex gap-2 mt-3 pt-3 border-t-2 border-gray-200">
             <button
               onClick={() => setShowTimeseries(!showTimeseries)}
@@ -954,233 +1176,591 @@ export default function Home() {
               💾 Storage
             </button>
 
-            {/* ✅ Timeseries Controls (only when timeseries is active) */}
+            {/* ============= View Selector Dropdown ============= */}
             {showTimeseries && (
-              <>
-                <select
-                  value={aggregation}
-                  onChange={(e) => setAggregation(e.target.value as "monthly" | "yearly")}
-                  className="border-2 border-gray-300 px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white ml-4"
-                >
-                  <option value="monthly">Monthly</option>
-                  <option value="yearly">Yearly</option>
-                </select>
-
-                <label className="flex items-center gap-2 px-4 py-2 bg-white border-2 border-gray-300 rounded-lg text-sm cursor-pointer hover:bg-gray-50">
-                  <input
-                    type="checkbox"
-                    checked={deseasonalize}
-                    onChange={(e) => setDeseasonalize(e.target.checked)}
-                    className="w-4 h-4"
-                  />
-                  <span>Deseasonalize</span>
-                </label>
-              </>
+              <select
+                value={timeseriesView}
+                onChange={(e) => setTimeseriesView(e.target.value as "raw" | "seasonal" | "deseasonalized")}
+                className="border-2 border-indigo-300 px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent bg-white"
+              >
+                <option value="raw">📊 Raw Data</option>
+                <option value="seasonal">🔄 Seasonal Pattern</option>
+                <option value="deseasonalized">📈 Deseasonalized Trend</option>
+              </select>
             )}
           </div>
         </div>
       </div>
 
-      <div className="flex-1 p-4 overflow-hidden">
-        {activeLayers.length === 0 && !showTimeseries && !showSummary && !showStorage ? (
-          <div className="h-full flex flex-col items-center justify-center text-gray-400">
-            <div className="text-6xl mb-4">🗺️</div>
-            <p className="text-xl font-medium">Select a layer to visualize data</p>
-            <p className="text-sm mt-2">Choose from Aquifers, Wells, GRACE, Rainfall, or Analysis Tools</p>
-          </div>
-        ) : (
-          <div className="h-full flex flex-col gap-4">
-            {/* ✅ Maps Grid */}
-            {activeLayers.length > 0 && (
-              <div className={`${(showTimeseries || showSummary || showStorage) ? 'h-1/2' : 'h-full'} grid gap-4 ${
-                activeLayers.length === 1 ? 'grid-cols-1' :
-                activeLayers.length === 2 ? 'grid-cols-2' :
-                activeLayers.length === 3 ? 'grid-cols-3' :
-                'grid-cols-2 grid-rows-2'
-              }`}>
-                {activeLayers.map((layer) => (
-                  <div key={layer.id} className="h-full">
-                    {renderMap(
-                      layer.id, 
-                      layer.name, 
-                      layer.icon,
-                      layer.color === 'purple' ? '#9333EA' :
-                      layer.color === 'green' ? '#16A34A' :
-                      layer.color === 'blue' ? '#2563EB' : '#DC2626'
-                    )}
-                  </div>
-                ))}
+      {/* Main Content Area */}
+      <div className="flex-1 p-6 overflow-y-auto">
+        {/* Maps Grid */}
+        {activeLayers.length > 0 && (
+          <div className={`grid gap-6 mb-6 ${activeLayers.length === 1 ? 'grid-cols-1' : activeLayers.length === 2 ? 'grid-cols-2' : activeLayers.length === 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
+            {activeLayers.map((layer) => (
+              <div key={layer.id} className="h-[600px]">
+                {renderMap(layer.id, layer.name, layer.icon, layer.color)}
               </div>
-            )}
-
-            {/* ✅ Analysis Panels */}
-            {(showTimeseries || showSummary || showStorage) && (
-              <div className={`${activeLayers.length > 0 ? 'h-1/2' : 'h-full'} grid gap-4 ${
-                [showTimeseries, showSummary, showStorage].filter(Boolean).length === 1 ? 'grid-cols-1' :
-                [showTimeseries, showSummary, showStorage].filter(Boolean).length === 2 ? 'grid-cols-2' :
-                'grid-cols-3'
-              }`}>
-                {/* Timeseries Panel */}
-                {showTimeseries && (
-                  <div className="bg-white rounded-xl shadow-2xl p-4 overflow-y-auto border-2 border-indigo-400">
-                    <div className="flex items-center gap-2 mb-4">
-                      <span className="text-2xl">📈</span>
-                      <h3 className="text-lg font-bold text-gray-800">Timeseries Analysis</h3>
-                    </div>
-                    
-                    {timeseriesData.length === 0 ? (
-                      <p className="text-gray-500 text-center py-8">No timeseries data available</p>
-                    ) : (
-                      <div className="space-y-2">
-                        <div className="text-sm text-gray-600 mb-2">
-                          <strong>Total Points:</strong> {timeseriesData.length} | 
-                          <strong> Aggregation:</strong> {aggregation} |
-                          <strong> Deseasonalized:</strong> {deseasonalize ? 'Yes' : 'No'}
-                        </div>
-                        <div className="max-h-[400px] overflow-y-auto">
-                          <table className="w-full text-sm">
-                            <thead className="bg-gray-100 sticky top-0">
-                              <tr>
-                                <th className="px-2 py-1 text-left">Date</th>
-                                <th className="px-2 py-1 text-right">Avg GWL (m)</th>
-                                <th className="px-2 py-1 text-right">Count</th>
-                                {deseasonalize && <th className="px-2 py-1 text-right">Deseasonalized</th>}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {timeseriesData.map((point, idx) => (
-                                <tr key={idx} className="border-b">
-                                  <td className="px-2 py-1">{new Date(point.date).toLocaleDateString()}</td>
-                                  <td className="px-2 py-1 text-right">{point.avg_gwl.toFixed(2)}</td>
-                                  <td className="px-2 py-1 text-right">{point.count}</td>
-                                  {deseasonalize && point.deseasonalized && (
-                                    <td className="px-2 py-1 text-right">{point.deseasonalized.toFixed(2)}</td>
-                                  )}
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Summary Panel */}
-                {showSummary && (
-                  <div className="bg-white rounded-xl shadow-2xl p-4 overflow-y-auto border-2 border-orange-400">
-                    <div className="flex items-center gap-2 mb-4">
-                      <span className="text-2xl">📊</span>
-                      <h3 className="text-lg font-bold text-gray-800">Regional Summary</h3>
-                    </div>
-                    
-                    {!summaryData ? (
-                      <p className="text-gray-500 text-center py-8">No summary data available</p>
-                    ) : summaryData.error ? (
-                      <p className="text-red-500 text-center py-8">{summaryData.error}</p>
-                    ) : (
-                      <div className="space-y-4">
-                        <div className="bg-blue-50 p-3 rounded-lg">
-                          <h4 className="font-bold text-sm mb-2 text-blue-900">Statistics</h4>
-                          <div className="grid grid-cols-2 gap-2 text-sm">
-                            <div><strong>Mean GWL:</strong> {summaryData.statistics.mean_gwl.toFixed(2)} m</div>
-                            <div><strong>Min GWL:</strong> {summaryData.statistics.min_gwl.toFixed(2)} m</div>
-                            <div><strong>Max GWL:</strong> {summaryData.statistics.max_gwl.toFixed(2)} m</div>
-                            <div><strong>Std Dev:</strong> {summaryData.statistics.std_gwl.toFixed(2)} m</div>
-                          </div>
-                        </div>
-
-                        <div className={`p-3 rounded-lg ${summaryData.trend.trend_direction === 'declining' ? 'bg-red-50' : 'bg-green-50'}`}>
-                          <h4 className={`font-bold text-sm mb-2 ${summaryData.trend.trend_direction === 'declining' ? 'text-red-900' : 'text-green-900'}`}>
-                            Trend Analysis
-                          </h4>
-                          <div className="space-y-1 text-sm">
-                            <div><strong>Slope:</strong> {summaryData.trend.slope_m_per_year.toFixed(4)} m/year</div>
-                            <div><strong>Direction:</strong> {summaryData.trend.trend_direction === 'declining' ? '📉 Declining' : '📈 Recovering'}</div>
-                            <div><strong>R²:</strong> {summaryData.trend.r_squared.toFixed(3)}</div>
-                            <div><strong>P-value:</strong> {summaryData.trend.p_value.toFixed(4)}</div>
-                            <div><strong>Significance:</strong> {summaryData.trend.significance === 'significant' ? '✓ Significant' : '✗ Not Significant'}</div>
-                          </div>
-                        </div>
-
-                        <div className="bg-gray-50 p-3 rounded-lg">
-                          <h4 className="font-bold text-sm mb-2 text-gray-900">Temporal Coverage</h4>
-                          <div className="space-y-1 text-sm">
-                            <div><strong>Period:</strong> {new Date(summaryData.temporal_coverage.start_date).toLocaleDateString()} to {new Date(summaryData.temporal_coverage.end_date).toLocaleDateString()}</div>
-                            <div><strong>Span:</strong> {summaryData.temporal_coverage.span_years} years</div>
-                            <div><strong>Months of Data:</strong> {summaryData.temporal_coverage.months_of_data}</div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Storage Panel */}
-                {showStorage && (
-                  <div className="bg-white rounded-xl shadow-2xl p-4 overflow-y-auto border-2 border-teal-400">
-                    <div className="flex items-center gap-2 mb-4">
-                      <span className="text-2xl">💾</span>
-                      <h3 className="text-lg font-bold text-gray-800">Storage Analysis</h3>
-                    </div>
-                    
-                    {!storageData ? (
-                      <p className="text-gray-500 text-center py-8">No storage data available</p>
-                    ) : storageData.error ? (
-                      <p className="text-red-500 text-center py-8">{storageData.error}</p>
-                    ) : (
-                      <div className="space-y-4">
-                        <div className="bg-teal-50 p-3 rounded-lg">
-                          <h4 className="font-bold text-sm mb-2 text-teal-900">Aquifer Properties</h4>
-                          <div className="space-y-1 text-sm">
-                            <div><strong>Total Area:</strong> {storageData.aquifer_properties.total_area_km2.toFixed(2)} km²</div>
-                            <div><strong>Specific Yield:</strong> {storageData.aquifer_properties.area_weighted_specific_yield.toFixed(4)}</div>
-                          </div>
-                        </div>
-
-                        <div className="bg-blue-50 p-3 rounded-lg">
-                          <h4 className="font-bold text-sm mb-2 text-blue-900">Summary</h4>
-                          <div className="space-y-1 text-sm">
-                            <div><strong>Avg Annual Change:</strong> {storageData.summary.avg_annual_storage_change_mcm.toFixed(2)} MCM</div>
-                            <div><strong>Years Analyzed:</strong> {storageData.summary.years_analyzed}</div>
-                          </div>
-                        </div>
-
-                        <div className="bg-gray-50 p-3 rounded-lg">
-                          <h4 className="font-bold text-sm mb-2 text-gray-900">Yearly Storage</h4>
-                          <div className="max-h-[250px] overflow-y-auto">
-                            <table className="w-full text-xs">
-                              <thead className="bg-gray-200 sticky top-0">
-                                <tr>
-                                  <th className="px-2 py-1">Year</th>
-                                  <th className="px-2 py-1">Pre (m)</th>
-                                  <th className="px-2 py-1">Post (m)</th>
-                                  <th className="px-2 py-1">Δ (MCM)</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {storageData.yearly_storage.map((year, idx) => (
-                                  <tr key={idx} className="border-b">
-                                    <td className="px-2 py-1">{year.year}</td>
-                                    <td className="px-2 py-1">{year.pre_monsoon_gwl.toFixed(2)}</td>
-                                    <td className="px-2 py-1">{year.post_monsoon_gwl.toFixed(2)}</td>
-                                    <td className={`px-2 py-1 font-bold ${year.storage_change_mcm > 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                      {year.storage_change_mcm.toFixed(2)}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+            ))}
           </div>
         )}
+
+        {/* Analytics Panels Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+          {/* ============= TIMESERIES CHART SECTION (WITH RAINFALL) ============= */}
+          {showTimeseries && (
+            <div className="bg-white rounded-xl shadow-2xl p-4 overflow-y-auto border-2 border-indigo-400">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl">📈</span>
+                  <h3 className="text-lg font-bold text-gray-800">
+                    Timeseries Analysis
+                    {timeseriesResponse && (
+                      <span className="text-sm font-normal text-gray-500 ml-2">
+                        ({timeseriesResponse.view} view)
+                      </span>
+                    )}
+                  </h3>
+                </div>
+              </div>
+              
+              {!timeseriesResponse ? (
+                <p className="text-gray-500 text-center py-8">No timeseries data available</p>
+              ) : timeseriesResponse.error ? (
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-sm text-yellow-800">
+                  {timeseriesResponse.error}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {/* ============= DUAL-AXIS PLOTLY CHART ============= */}
+                  <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                    <Plot
+                      data={[
+                        // ✅ GWL Trace (Y1 - Left axis, REVERSED for raw view)
+                        {
+                          x: timeseriesResponse.timeseries.map(p => p.date),
+                          y: timeseriesResponse.timeseries.map(p => p.value || p.avg_gwl),
+                          type: 'scatter',
+                          mode: 'lines+markers',
+                          name: timeseriesResponse.view === 'raw' ? 'GWL' : 
+                                timeseriesResponse.view === 'seasonal' ? 'Seasonal Pattern' : 
+                                'Deseasonalized',
+                          line: { color: GWL_COLOR, width: 3 },
+                          marker: { size: 5 },
+                          yaxis: 'y'
+                        },
+                        // ✅ Trendline (only for raw and deseasonalized)
+                        ...(timeseriesResponse.statistics?.trendline && 
+                            (timeseriesResponse.view === 'raw' || timeseriesResponse.view === 'deseasonalized') ? [{
+                          x: timeseriesResponse.statistics.trendline.map(t => t.date),
+                          y: timeseriesResponse.statistics.trendline.map(t => t.trendline_value),
+                          type: 'scatter' as const,
+                          mode: 'lines' as const,
+                          name: `Trend (R²=${timeseriesResponse.statistics.r_squared.toFixed(3)})`,
+                          line: { 
+                            color: timeseriesResponse.statistics.trend_direction === 'declining' 
+                              ? TREND_DECLINE_COLOR 
+                              : TREND_RECOVER_COLOR,
+                            width: 2,
+                            dash: 'dash' 
+                          },
+                          yaxis: 'y'
+                        }] : []),
+                        // ✅ RAINFALL Trace (Y2 - Right axis, BAR for raw, LINE for others)
+                        ...(timeseriesResponse.chart_config?.rainfall_field && timeseriesResponse.timeseries.some(p => 
+                          (p as any)[timeseriesResponse.chart_config!.rainfall_field] !== undefined
+                        ) ? [{
+                          x: timeseriesResponse.timeseries.map(p => p.date),
+                          y: timeseriesResponse.timeseries.map(p => 
+                            (p as any)[timeseriesResponse.chart_config!.rainfall_field] || 0
+                          ),
+                          type: timeseriesResponse.chart_config.rainfall_chart_type === 'bar' ? 'bar' as const : 'scatter' as const,
+                          mode: timeseriesResponse.chart_config.rainfall_chart_type === 'line' ? 'lines' as const : undefined,
+                          name: `Rainfall (${timeseriesResponse.chart_config.rainfall_unit})`,
+                          marker: { color: RAIN_COLOR, opacity: 0.6 },
+                          line: timeseriesResponse.chart_config.rainfall_chart_type === 'line' ? 
+                            { color: RAIN_COLOR, width: 2 } : undefined,
+                          yaxis: 'y2'
+                        }] : [])
+                      ]}
+                      layout={{
+                        autosize: true,
+                        height: 450,
+                        margin: { l: 60, r: 60, t: 40, b: 60 },
+                        xaxis: { 
+                          title: 'Date',
+                          gridcolor: 'rgba(0,0,0,0.1)',
+                          showgrid: true,
+                          domain: [0, 1]
+                        },
+                        // Y1 - GWL axis (LEFT, reversed for raw view)
+                        yaxis: { 
+                          title: timeseriesResponse.view === 'raw' ? 'GWL (m bgl)' : 
+                                 timeseriesResponse.view === 'seasonal' ? 'Seasonal Component (m)' :
+                                 'Deseasonalized GWL (m)',
+                          gridcolor: 'rgba(0,0,0,0.1)',
+                          showgrid: true,
+                          autorange: (timeseriesResponse.chart_config?.gwl_y_axis_reversed && 
+                                     timeseriesResponse.view === 'raw') ? 'reversed' : true,
+                          side: 'left',
+                          titlefont: { color: GWL_COLOR },
+                          tickfont: { color: GWL_COLOR }
+                        },
+                        // Y2 - Rainfall axis (RIGHT)
+                        ...(timeseriesResponse.chart_config?.rainfall_field ? {
+                          yaxis2: {
+                            title: `Rainfall (${timeseriesResponse.chart_config.rainfall_unit})`,
+                            overlaying: 'y',
+                            side: 'right',
+                            showgrid: false,
+                            titlefont: { color: RAIN_COLOR },
+                            tickfont: { color: RAIN_COLOR },
+                            rangemode: 'tozero'
+                          }
+                        } : {}),
+                        legend: {
+                          orientation: 'h',
+                          x: 0,
+                          y: -0.2,
+                          xanchor: 'left',
+                          yanchor: 'top',
+                          bgcolor: 'rgba(255,255,255,0.9)',
+                          bordercolor: 'rgba(0,0,0,0.1)',
+                          borderwidth: 1
+                        },
+                        hovermode: 'x unified',
+                        plot_bgcolor: 'white',
+                        paper_bgcolor: 'white',
+                        font: { family: 'Arial, sans-serif', size: 12 }
+                      }}
+                      config={{
+                        displayModeBar: true,
+                        displaylogo: false,
+                        modeBarButtonsToRemove: ['pan2d', 'select2d', 'lasso2d', 'resetScale2d', 'toggleSpikelines'],
+                        toImageButtonOptions: {
+                          format: 'png',
+                          filename: `timeseries_${timeseriesResponse.view}_${new Date().toISOString().split('T')[0]}`,
+                          height: 800,
+                          width: 1200,
+                          scale: 2
+                        }
+                      }}
+                      style={{ width: '100%' }}
+                      useResizeHandler={true}
+                    />
+                  </div>
+
+                  {/* Statistics Card */}
+                  {timeseriesResponse.statistics && (
+                    <div className={`p-3 rounded-lg border ${
+                      timeseriesResponse.statistics.trend_direction === 'declining' 
+                        ? 'bg-red-50 border-red-200' 
+                        : 'bg-green-50 border-green-200'
+                    }`}>
+                      <h4 className="font-bold text-sm mb-2">
+                        {timeseriesResponse.view === 'raw' && '📊 Raw Data Statistics'}
+                        {timeseriesResponse.view === 'seasonal' && '🔄 Seasonal Component'}
+                        {timeseriesResponse.view === 'deseasonalized' && '📈 Trend Analysis'}
+                      </h4>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        {timeseriesResponse.view === 'raw' && timeseriesResponse.statistics.mean_gwl && (
+                          <>
+                            <div><strong>Mean GWL:</strong> {timeseriesResponse.statistics.mean_gwl.toFixed(2)} m</div>
+                            <div><strong>Min/Max:</strong> {timeseriesResponse.statistics.min_gwl?.toFixed(2)} / {timeseriesResponse.statistics.max_gwl?.toFixed(2)} m</div>
+                          </>
+                        )}
+                        
+                        {timeseriesResponse.view === 'seasonal' && (
+                          <>
+                            <div><strong>Amplitude:</strong> {timeseriesResponse.statistics.seasonal_amplitude?.toFixed(2)} m</div>
+                            <div><strong>Mean:</strong> {timeseriesResponse.statistics.seasonal_mean?.toFixed(2)} m</div>
+                          </>
+                        )}
+                        
+                        {(timeseriesResponse.view === 'raw' || timeseriesResponse.view === 'deseasonalized') && (
+                          <>
+                            <div><strong>Slope:</strong> {timeseriesResponse.statistics.trend_slope_m_per_year.toFixed(4)} m/yr</div>
+                            <div><strong>R²:</strong> {timeseriesResponse.statistics.r_squared.toFixed(3)}</div>
+                            <div><strong>P-value:</strong> {timeseriesResponse.statistics.p_value.toFixed(4)}</div>
+                            <div>
+                              <strong>Significance:</strong> 
+                              <span className={timeseriesResponse.statistics.significance === 'significant' ? 'text-green-600 font-semibold' : 'text-gray-500'}>
+                                {' '}{timeseriesResponse.statistics.significance === 'significant' ? '✓ Yes (p<0.05)' : '✗ No'}
+                              </span>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                      {timeseriesResponse.statistics.note && (
+                        <div className="mt-2 pt-2 border-t border-gray-300">
+                          <p className="text-xs text-gray-700 italic">
+                            <strong>Note:</strong> {timeseriesResponse.statistics.note}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Expandable Data Table */}
+                  <details className="bg-gray-50 rounded-lg border border-gray-200">
+                    <summary className="px-3 py-2 cursor-pointer font-semibold text-sm text-gray-700 hover:bg-gray-100">
+                      📋 View Data Table ({timeseriesResponse.count} points)
+                    </summary>
+                    <div className="max-h-[300px] overflow-y-auto p-3">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-100 sticky top-0">
+                          <tr>
+                            <th className="px-2 py-1 text-left">Date</th>
+                            <th className="px-2 py-1 text-right">
+                              {timeseriesResponse.view === 'raw' ? 'Avg GWL (m)' : 'Value (m)'}
+                            </th>
+                            {timeseriesResponse.view === 'raw' && (
+                              <>
+                                <th className="px-2 py-1 text-right">Count</th>
+                                {timeseriesResponse.chart_config?.rainfall_field && (
+                                  <th className="px-2 py-1 text-right">
+                                    Rainfall ({timeseriesResponse.chart_config.rainfall_unit})
+                                  </th>
+                                )}
+                              </>
+                            )}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {timeseriesResponse.timeseries.map((point, idx) => (
+                            <tr key={idx} className="border-b hover:bg-gray-50">
+                              <td className="px-2 py-1">{new Date(point.date).toLocaleDateString()}</td>
+                              <td className="px-2 py-1 text-right font-medium">
+                                {point.value?.toFixed(2) || point.avg_gwl?.toFixed(2) || 'N/A'}
+                              </td>
+                              {timeseriesResponse.view === 'raw' && (
+                                <>
+                                  {point.count && (
+                                    <td className="px-2 py-1 text-right text-gray-500">{point.count}</td>
+                                  )}
+                                  {timeseriesResponse.chart_config?.rainfall_field && (
+                                    <td className="px-2 py-1 text-right text-blue-600">
+                                      {((point as any)[timeseriesResponse.chart_config.rainfall_field])?.toFixed(2) || 'N/A'}
+                                    </td>
+                                  )}
+                                </>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+
+                  {/* Download Button */}
+                  <div className="flex justify-center">
+                    <button
+                      onClick={() => {
+                        const headers = [
+                          'Date', 
+                          timeseriesResponse.view === 'raw' ? 'Avg GWL (m)' : 'Value (m)', 
+                          ...(timeseriesResponse.view === 'raw' ? ['Count'] : []),
+                          ...(timeseriesResponse.chart_config?.rainfall_field ? 
+                            [`Rainfall (${timeseriesResponse.chart_config.rainfall_unit})`] : [])
+                        ];
+                        
+                        const csv = [
+                          headers.join(','),
+                          ...timeseriesResponse.timeseries.map(p => 
+                            [
+                              p.date,
+                              p.value?.toFixed(2) || p.avg_gwl?.toFixed(2),
+                              ...(timeseriesResponse.view === 'raw' && p.count ? [p.count] : []),
+                              ...(timeseriesResponse.chart_config?.rainfall_field ? 
+                                [((p as any)[timeseriesResponse.chart_config.rainfall_field])?.toFixed(2) || ''] : [])
+                            ].join(',')
+                          )
+                        ].join('\n');
+                        
+                        const blob = new Blob([csv], { type: 'text/csv' });
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `timeseries_${timeseriesResponse.view}_${new Date().toISOString().split('T')[0]}.csv`;
+                        a.click();
+                      }}
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-all flex items-center gap-2"
+                    >
+                      <span>📥</span>
+                      Download CSV
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ============= SUMMARY SECTION (unchanged) ============= */}
+          {showSummary && (
+            <div className="bg-white rounded-xl shadow-2xl p-4 overflow-y-auto border-2 border-orange-400">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="text-2xl">📊</span>
+                <h3 className="text-lg font-bold text-gray-800">Regional Summary</h3>
+              </div>
+              
+              {!summaryData ? (
+                <p className="text-gray-500 text-center py-8">No summary data available</p>
+              ) : summaryData.error ? (
+                <p className="text-red-500 text-center py-8">{summaryData.error}</p>
+              ) : (
+                <div className="space-y-4">
+                  <div className="bg-blue-50 p-3 rounded-lg">
+                    <h4 className="font-bold text-sm mb-2 text-blue-900">Statistics</h4>
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <div><strong>Mean GWL:</strong> {summaryData.statistics.mean_gwl.toFixed(2)} m</div>
+                      <div><strong>Min GWL:</strong> {summaryData.statistics.min_gwl.toFixed(2)} m</div>
+                      <div><strong>Max GWL:</strong> {summaryData.statistics.max_gwl.toFixed(2)} m</div>
+                      <div><strong>Std Dev:</strong> {summaryData.statistics.std_gwl.toFixed(2)} m</div>
+                    </div>
+                  </div>
+
+                  <div className={`p-3 rounded-lg ${summaryData.trend.trend_direction === 'declining' ? 'bg-red-50' : 'bg-green-50'}`}>
+                    <h4 className={`font-bold text-sm mb-2 ${summaryData.trend.trend_direction === 'declining' ? 'text-red-900' : 'text-green-900'}`}>
+                      Trend Analysis
+                    </h4>
+                    <div className="space-y-1 text-sm">
+                      <div><strong>Slope:</strong> {summaryData.trend.slope_m_per_year.toFixed(4)} m/year</div>
+                      <div><strong>Direction:</strong> {summaryData.trend.trend_direction === 'declining' ? '📉 Declining' : '📈 Recovering'}</div>
+                      <div><strong>R²:</strong> {summaryData.trend.r_squared.toFixed(3)}</div>
+                      <div><strong>P-value:</strong> {summaryData.trend.p_value.toFixed(4)}</div>
+                      <div><strong>Significance:</strong> {summaryData.trend.significance === 'significant' ? '✓ Significant' : '✗ Not Significant'}</div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-50 p-3 rounded-lg">
+                    <h4 className="font-bold text-sm mb-2 text-gray-900">Temporal Coverage</h4>
+                    <div className="space-y-1 text-sm">
+                      <div><strong>Period:</strong> {new Date(summaryData.temporal_coverage.start_date).toLocaleDateString()} to {new Date(summaryData.temporal_coverage.end_date).toLocaleDateString()}</div>
+                      <div><strong>Span:</strong> {summaryData.temporal_coverage.span_years} years</div>
+                      <div><strong>Months of Data:</strong> {summaryData.temporal_coverage.months_of_data}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ============= STORAGE SECTION (unchanged) ============= */}
+          {showStorage && (
+            <div className="bg-white rounded-xl shadow-2xl p-4 overflow-y-auto border-2 border-teal-400">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="text-2xl">💾</span>
+                <h3 className="text-lg font-bold text-gray-800">Storage Analysis</h3>
+              </div>
+              
+              {!storageData ? (
+                <p className="text-gray-500 text-center py-8">No storage data available</p>
+              ) : storageData.error ? (
+                <p className="text-red-500 text-center py-8">{storageData.error}</p>
+              ) : (
+                <div className="space-y-4">
+                  <div className="bg-teal-50 p-3 rounded-lg">
+                    <h4 className="font-bold text-sm mb-2 text-teal-900">Aquifer Properties</h4>
+                    <div className="space-y-1 text-sm">
+                      <div><strong>Total Area:</strong> {storageData.aquifer_properties.total_area_km2.toFixed(2)} km²</div>
+                      <div><strong>Specific Yield:</strong> {storageData.aquifer_properties.area_weighted_specific_yield.toFixed(4)}</div>
+                    </div>
+                  </div>
+
+                  <div className="bg-blue-50 p-3 rounded-lg">
+                    <h4 className="font-bold text-sm mb-2 text-blue-900">Summary</h4>
+                    <div className="space-y-1 text-sm">
+                      <div><strong>Avg Annual Change:</strong> {storageData.summary.avg_annual_storage_change_mcm.toFixed(2)} MCM</div>
+                      <div><strong>Years Analyzed:</strong> {storageData.summary.years_analyzed}</div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-50 p-3 rounded-lg">
+                    <h4 className="font-bold text-sm mb-2 text-gray-900">Yearly Storage</h4>
+                    <div className="max-h-[250px] overflow-y-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-200 sticky top-0">
+                          <tr>
+                            <th className="px-2 py-1">Year</th>
+                            <th className="px-2 py-1">Pre (m)</th>
+                            <th className="px-2 py-1">Post (m)</th>
+                            <th className="px-2 py-1">Δ (MCM)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {storageData.yearly_storage.map((year, idx) => (
+                            <tr key={idx} className="border-b">
+                              <td className="px-2 py-1">{year.year}</td>
+                              <td className="px-2 py-1">{year.pre_monsoon_gwl.toFixed(2)}</td>
+                              <td className="px-2 py-1">{year.post_monsoon_gwl.toFixed(2)}</td>
+                              <td className={`px-2 py-1 font-bold ${year.storage_change_mcm > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                {year.storage_change_mcm.toFixed(2)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Chatbot (unchanged) */}
+      <div className="fixed right-6 bottom-6 z-[2000]">
+        {isChatOpen && (
+          <div className="mb-4 w-96 h-[600px] bg-white rounded-2xl shadow-2xl flex flex-col border-2 border-blue-200">
+            <div className="bg-gradient-to-r from-blue-600 to-blue-500 text-white px-6 py-4 rounded-t-2xl flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="bg-white/20 p-2 rounded-lg">
+                  <span className="text-2xl">🤖</span>
+                </div>
+                <div>
+                  <h3 className="font-bold text-lg">GeoHydro Assistant</h3>
+                  <p className="text-xs text-blue-100">
+                    {activeLayers.length > 0 
+                      ? `Analyzing: ${activeLayers.map(l => l.name).join(', ')}` 
+                      : 'Groundwater Expert'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsChatOpen(false)}
+                className="text-white hover:bg-white/20 rounded-lg p-2 transition-all"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
+              {chatMessages.length === 1 && (
+                <div className="mb-4">
+                  <p className="text-xs text-gray-500 mb-2 font-medium">Try asking:</p>
+                  <div className="space-y-2">
+                    {activeLayers.length > 0 ? (
+                      <>
+                        <button
+                          onClick={() => setChatInput("What patterns do you see in the current map?")}
+                          className="block w-full text-left text-xs bg-white border border-gray-200 rounded-lg px-3 py-2 hover:bg-blue-50 hover:border-blue-300 transition-all"
+                        >
+                          💡 What patterns do you see in the current map?
+                        </button>
+                        <button
+                          onClick={() => setChatInput("Analyze the displayed data")}
+                          className="block w-full text-left text-xs bg-white border border-gray-200 rounded-lg px-3 py-2 hover:bg-blue-50 hover:border-blue-300 transition-all"
+                        >
+                          💡 Analyze the displayed data
+                        </button>
+                        <button
+                          onClick={() => setChatInput("What does this tell us about groundwater?")}
+                          className="block w-full text-left text-xs bg-white border border-gray-200 rounded-lg px-3 py-2 hover:bg-blue-50 hover:border-blue-300 transition-all"
+                        >
+                          💡 What does this tell us about groundwater?
+                        </button>
+                      </>
+                    ) : (
+                      suggestedQuestions.map((question, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => setChatInput(question)}
+                          className="block w-full text-left text-xs bg-white border border-gray-200 rounded-lg px-3 py-2 hover:bg-blue-50 hover:border-blue-300 transition-all"
+                        >
+                          💡 {question}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {chatMessages.map((message, idx) => (
+                <div
+                  key={idx}
+                  className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                >
+                  <div
+                    className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+                      message.role === "user"
+                        ? "bg-blue-600 text-white"
+                        : "bg-white border border-gray-200 text-gray-800"
+                    }`}
+                  >
+                    <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                    {message.role === "assistant" && message.sourcesUsed && message.sourcesUsed > 0 && (
+                      <div className="mt-2 pt-2 border-t border-gray-200 flex items-center gap-2 text-xs text-gray-500">
+                        <span className="bg-green-100 text-green-700 px-2 py-1 rounded">
+                          📚 {message.sourcesUsed} sources
+                        </span>
+                      </div>
+                    )}
+                    <p className="text-xs mt-1 opacity-60">
+                      {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </p>
+                  </div>
+                </div>
+              ))}
+
+              {isChatLoading && (
+                <div className="flex justify-start">
+                  <div className="bg-white border border-gray-200 rounded-2xl px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <div className="animate-spin rounded-full h-4 w-4 border-2 border-blue-600 border-t-transparent"></div>
+                      <span className="text-sm text-gray-600">Analyzing map context...</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            <div className="p-4 border-t border-gray-200 bg-white rounded-b-2xl">
+              <div className="flex gap-2">
+                <textarea
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyPress={handleChatKeyPress}
+                  placeholder={
+                    activeLayers.length > 0 
+                      ? "Ask about the displayed data..." 
+                      : "Ask about groundwater, GRACE, rainfall..."
+                  }
+                  className="flex-1 border-2 border-gray-300 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                  rows={2}
+                  disabled={isChatLoading}
+                />
+                <button
+                  onClick={handleSendMessage}
+                  disabled={isChatLoading || !chatInput.trim()}
+                  className="bg-blue-600 text-white px-4 rounded-lg hover:bg-blue-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+                >
+                  <span className="text-xl">➤</span>
+                </button>
+              </div>
+              <p className="text-xs text-gray-400 mt-2 text-center">
+                {activeLayers.length > 0 && (
+                  <span className="text-blue-600 font-medium">Context-aware • </span>
+                )}
+                Powered by LLaMA 3.1 • Press Enter to send
+              </p>
+            </div>
+          </div>
+        )}
+
+        <button
+          onClick={() => setIsChatOpen(!isChatOpen)}
+          className={`bg-gradient-to-r from-blue-600 to-blue-500 text-white rounded-full w-16 h-16 flex items-center justify-center shadow-2xl hover:scale-110 transition-all duration-200 ${
+            isChatOpen ? "rotate-0" : "animate-bounce"
+          }`}
+        >
+          {isChatOpen ? (
+            <span className="text-2xl">✕</span>
+          ) : (
+            <span className="text-3xl">💬</span>
+          )}
+        </button>
       </div>
     </main>
   );
