@@ -74,47 +74,52 @@ interface WellPoint {
   hovertext: string;
 }
 
-// ============= UPDATED: Timeseries Interfaces with Rainfall =============
 interface TimeseriesPoint {
   date: string;
-  avg_gwl?: number;        // For raw view GWL
-  value?: number;          // For seasonal/deseasonalized GWL
-  avg_rainfall?: number;   // Raw rainfall (mm/day) - kept for reference
-  monthly_rainfall_mm?: number;  // ✅ NEW: Monthly rainfall total (mm/month)
-  days_in_month?: number;  // ✅ NEW: Days in month
+  avg_gwl?: number;
+  avg_tws?: number;
+  avg_rainfall?: number;
+  monthly_rainfall_mm?: number;
+  days_in_month?: number;
   count?: number;
-  component?: string;
+  gwl_seasonal?: number;
+  grace_seasonal?: number;
+  rainfall_seasonal?: number;
+  gwl_deseasonalized?: number;
+  grace_deseasonalized?: number;
+  rainfall_deseasonalized?: number;
 }
 
-interface TrendlinePoint {
-  date: string;
-  trendline_value: number;
+interface TrendStatistics {
+  slope_per_month?: number;
+  slope_per_year: number;
+  r_squared: number;
+  p_value: number;
+  direction: string;
+  significance: string;
+  mean?: number;
+  min?: number;
+  max?: number;
+  std?: number;
+}
+
+interface TimeseriesStatistics {
+  gwl_trend?: TrendStatistics;
+  grace_trend?: TrendStatistics;
+  rainfall_trend?: TrendStatistics;
+  seasonal_amplitude?: number;
+  seasonal_mean?: number;
+  view?: string;
+  note?: string;
 }
 
 interface ChartConfig {
   gwl_chart_type: string;
+  grace_chart_type?: string;
   rainfall_chart_type: string;
   rainfall_field: string;
   rainfall_unit: string;
   gwl_y_axis_reversed: boolean;
-}
-
-interface TimeseriesStatistics {
-  mean_gwl?: number;
-  min_gwl?: number;
-  max_gwl?: number;
-  std_gwl?: number;
-  trend_slope_m_per_month?: number;
-  trend_slope_m_per_year: number;
-  r_squared: number;
-  p_value: number;
-  trend_direction: string;
-  significance: string;
-  trendline: TrendlinePoint[];
-  view: string;
-  note?: string;
-  seasonal_amplitude?: number;
-  seasonal_mean?: number;
 }
 
 interface TimeseriesResponse {
@@ -125,10 +130,11 @@ interface TimeseriesResponse {
     district: string | null;
   };
   count: number;
-  chart_config?: ChartConfig;  // ✅ NEW: Chart configuration from backend
+  chart_config?: ChartConfig;
   timeseries: TimeseriesPoint[];
   statistics: TimeseriesStatistics | null;
   error?: string;
+  message?: string;
 }
 
 interface WellsSummary {
@@ -263,6 +269,322 @@ interface MapContext {
   };
 }
 
+// ============= NEW: Advanced Module Interfaces =============
+interface ASIFeature {
+  type: "Feature";
+  id: string;
+  properties: {
+    aquifer: string;
+    majoraquif: string;
+    asi_score: number;
+    specific_yield: number;
+    area_m2: number;
+  };
+  geometry: GeoJSON.Geometry;
+}
+
+interface ASIResponse {
+  module: string;
+  description: string;
+  filters: { state: string | null; district: string | null };
+  statistics: {
+    mean_asi: number;
+    median_asi: number;
+    std_asi: number;
+    min_asi: number;
+    max_asi: number;
+    dominant_aquifer: string;
+    avg_specific_yield: number;
+    total_area_km2: number;
+  };
+  count: number;
+  geojson: {
+    type: "FeatureCollection";
+    features: ASIFeature[];
+  };
+  methodology: {
+    approach: string;
+    quantile_stretch: { low: number; high: number };
+    interpretation: string;
+  };
+}
+
+interface NetworkDensityPoint {
+  site_id: string;
+  latitude: number;
+  longitude: number;
+  slope_m_per_year: number;
+  gwl_std: number;
+  strength: number;
+  n_observations: number;
+  local_density_per_km2: number;
+  neighbors_within_radius: number;
+}
+
+interface NetworkDensityResponse {
+  module: string;
+  description: string;
+  filters: { state: string | null; district: string | null };
+  parameters: { radius_km: number };
+  statistics: {
+    total_sites: number;
+    avg_strength: number;
+    avg_density: number;
+    median_observations: number;
+  };
+  count: number;
+  data: NetworkDensityPoint[];
+}
+
+interface SASSPoint {
+  site_id: string;
+  latitude: number;
+  longitude: number;
+  sass_score: number;
+  gwl_stress: number;
+  grace_z: number;
+  rain_z: number;
+  gwl: number;
+}
+
+interface SASSResponse {
+  module: string;
+  description: string;
+  filters: { state: string | null; district: string | null; year: number; month: number };
+  formula: string;
+  statistics: {
+    mean_sass: number;
+    max_sass: number;
+    min_sass: number;
+    stressed_sites: number;
+  };
+  count: number;
+  data: SASSPoint[];
+}
+
+interface DivergencePoint {
+  latitude: number;
+  longitude: number;
+  divergence: number;
+  grace_z: number;
+  well_z_interpolated: number;
+  tws: number;
+}
+
+interface DivergenceResponse {
+  module: string;
+  description: string;
+  filters: { state: string | null; district: string | null; year: number; month: number };
+  statistics: {
+    mean_divergence: number;
+    positive_divergence_pixels: number;
+    negative_divergence_pixels: number;
+    max_divergence: number;
+    min_divergence: number;
+  };
+  count: number;
+  data: DivergencePoint[];
+}
+
+interface ForecastPoint {
+  longitude: number;
+  latitude: number;
+  pred_delta_m: number;           // ← Main forecast value (12-month change)
+  current_gwl: number;
+  forecast_gwl: number;
+  r_squared: number;
+  trend_component: number;
+  grace_component: number;
+  n_months_training: number;
+}
+
+interface ForecastResponse {
+  module: string;
+  description: string;
+  method: string;
+  filters: { state: string | null; district: string | null };
+  parameters: {
+    forecast_months: number;
+    k_neighbors: number;
+    grid_resolution: number;
+    grace_used: boolean;
+  };
+  statistics: {
+    mean_change_m: number;
+    median_change_m: number;
+    declining_cells: number;
+    recovering_cells: number;
+    mean_r_squared: number;
+    success_rate: number;
+  };
+  count: number;
+  data: ForecastPoint[];
+}
+
+interface RechargeStructure {
+  structure_type: string;
+  recommended_units: number;
+  total_capacity_mcm: number;
+  allocation_fraction: number;
+}
+
+interface RechargeSiteRecommendation {
+  site_id: string;
+  latitude: number;
+  longitude: number;
+  stress_category: string;
+  recommended_structure: string;
+  current_gwl: number;
+}
+
+interface RechargeResponse {
+  module: string;
+  description: string;
+  filters: { state: string | null; district: string | null };
+  analysis_parameters: {
+    area_km2: number;
+    dominant_lithology: string;
+    runoff_coefficient: number;
+    monsoon_rainfall_m: number;
+    capture_fraction: number;
+    year_analyzed: number;
+  };
+  potential: {
+    total_recharge_potential_mcm: number;
+    per_km2_mcm: number;
+  };
+  structure_plan: RechargeStructure[];
+  site_recommendations: RechargeSiteRecommendation[];
+  count: number;
+}
+
+interface SignificantTrendPoint {
+  site_id: string;
+  latitude: number;
+  longitude: number;
+  slope_m_per_year: number;
+  p_value: number;
+  trend_direction: string;
+  significance_level: string;
+  n_months: number;
+  date_range: string;
+}
+
+interface SignificantTrendsResponse {
+  module: string;
+  description: string;
+  filters: { state: string | null; district: string | null };
+  parameters: { p_threshold: number; method: string };
+  statistics: {
+    total_significant: number;
+    declining: number;
+    recovering: number;
+    mean_slope: number;
+    high_significance: number;
+  };
+  count: number;
+  data: SignificantTrendPoint[];
+}
+
+interface ChangepointSite {
+  site_id: string;
+  latitude: number;
+  longitude: number;
+  changepoint_date: string;
+  changepoint_year: number;
+  changepoint_month: number;
+  n_breakpoints: number;
+  all_breakpoints: string[];
+  series_length: number;
+}
+
+interface ChangepointResponse {
+  module: string;
+  description: string;
+  filters: { state: string | null; district: string | null };
+  parameters: { penalty: number; algorithm: string; model: string };
+  statistics: {
+    total_sites_analyzed: number;
+    sites_with_changepoints: number;
+    detection_rate: number;
+    avg_series_length: number;
+  };
+  changepoints: {
+    count: number;
+    data: ChangepointSite[];
+  };
+  coverage: {
+    count: number;
+    data: any[];
+  };
+}
+
+interface LagCorrelationPoint {
+  site_id: string;
+  latitude: number;
+  longitude: number;
+  best_lag_months: number;
+  correlation: number;
+  abs_correlation: number;
+  relationship: string;
+  n_months_analyzed: number;
+}
+
+interface LagCorrelationResponse {
+  module: string;
+  description: string;
+  filters: { state: string | null; district: string | null };
+  parameters: { max_lag_months: number };
+  statistics: {
+    total_sites: number;
+    mean_lag: number;
+    median_lag: number;
+    mean_abs_correlation: number;
+    lag_distribution: Record<number, number>;
+  };
+  count: number;
+  data: LagCorrelationPoint[];
+}
+
+interface HotspotPoint {
+  site_id: string;
+  latitude: number;
+  longitude: number;
+  slope_m_per_year: number;
+  cluster: number;
+}
+
+interface HotspotCluster {
+  cluster_id: number;
+  n_sites: number;
+  mean_slope: number;
+  max_slope: number;
+  centroid_lat: number;
+  centroid_lon: number;
+}
+
+interface HotspotsResponse {
+  module: string;
+  description: string;
+  filters: { state: string | null; district: string | null };
+  parameters: {
+    eps_km: number;
+    min_samples: number;
+    algorithm: string;
+    metric: string;
+  };
+  statistics: {
+    total_declining_sites: number;
+    n_clusters: number;
+    noise_points: number;
+    clustered_points: number;
+    clustering_rate: number;
+  };
+  clusters: HotspotCluster[];
+  count: number;
+  data: HotspotPoint[];
+}
+
 const COLOR_PALETTE = [
   "#E91E63", "#9C27B0", "#673AB7", "#3F51B5", "#2196F3", "#03A9F4",
   "#00BCD4", "#009688", "#4CAF50", "#8BC34A", "#CDDC39", "#FFEB3B",
@@ -271,6 +593,7 @@ const COLOR_PALETTE = [
 
 // ============= DASH-COMPATIBLE COLORS =============
 const GWL_COLOR = "#8D6E63";
+const GRACE_COLOR = "#00695C";
 const RAIN_COLOR = "#1E88E5";
 const TREND_DECLINE_COLOR = "#DC2626";
 const TREND_RECOVER_COLOR = "#16A34A";
@@ -318,6 +641,51 @@ const getWellColor = (category: string): string => {
   }
 };
 
+// ============= NEW: Advanced Module Color Helpers =============
+const getASIColor = (score: number): string => {
+  // Match backend YlGn colorscale (Yellow-Green)
+  if (score < 1) return "#FEE5D9";      // Very light yellow
+  if (score < 2) return "#FCBBA1";      // Light orange-yellow
+  if (score < 3) return "#FB6A4A";      // Orange
+  if (score < 4) return "#CB181D";      // Red-orange
+  return "#67000D";                      // Dark red
+  
+  // Alternative: Green scale (higher = better)
+  // if (score < 1) return "#FFFFCC";   // Light yellow
+  // if (score < 2) return "#C2E699";   // Yellow-green
+  // if (score < 3) return "#78C679";   // Light green
+  // if (score < 4) return "#31A354";   // Green
+  // return "#006837";                   // Dark green
+};
+const getSASSColor = (score: number): string => {
+  if (score < -1) return "#22C55E";
+  if (score < 0) return "#84CC16";
+  if (score < 1) return "#FCD34D";
+  if (score < 2) return "#F59E0B";
+  return "#DC2626";
+};
+
+const getDivergenceColor = (value: number): string => {
+  const numValue = Number(value);  // ← FORCE NUMBER CONVERSION
+  
+  if (numValue < -2) return "#DC2626";
+  if (numValue < -1) return "#F87171";
+  if (numValue < 0) return "#FCA5A5";
+  if (numValue < 1) return "#93C5FD";
+  if (numValue < 2) return "#3B82F6";
+  return "#1D4ED8";
+};
+
+const getHotspotColor = (cluster: number): string => {
+  if (cluster === -1) return "#9CA3AF"; // Noise
+  return COLOR_PALETTE[cluster % COLOR_PALETTE.length];
+};
+
+const getTrendColor = (slope: number): string => {
+  if (slope > 0) return "#DC2626"; // Declining (deeper = red)
+  return "#16A34A"; // Recovering (shallower = green)
+};
+
 export default function Home() {
   const [states, setStates] = useState<StateType[]>([]);
   const [districts, setDistricts] = useState<DistrictType[]>([]);
@@ -330,10 +698,21 @@ export default function Home() {
   const [rainfallResponse, setRainfallResponse] = useState<RainfallResponse | null>(null);
   const [wellsResponse, setWellsResponse] = useState<WellsResponse | null>(null);
   
-  // ============= UPDATED: Timeseries State =============
   const [timeseriesResponse, setTimeseriesResponse] = useState<TimeseriesResponse | null>(null);
   const [summaryData, setSummaryData] = useState<WellsSummary | null>(null);
   const [storageData, setStorageData] = useState<StorageResponse | null>(null);
+  
+  // ============= NEW: Advanced Module States =============
+  const [asiData, setAsiData] = useState<ASIResponse | null>(null);
+  const [networkDensityData, setNetworkDensityData] = useState<NetworkDensityResponse | null>(null);
+  const [sassData, setSassData] = useState<SASSResponse | null>(null);
+  const [divergenceData, setDivergenceData] = useState<DivergenceResponse | null>(null);
+  const [forecastData, setForecastData] = useState<ForecastResponse | null>(null);
+  const [rechargeData, setRechargeData] = useState<RechargeResponse | null>(null);
+  const [significantTrendsData, setSignificantTrendsData] = useState<SignificantTrendsResponse | null>(null);
+  const [changepointsData, setChangepointsData] = useState<ChangepointResponse | null>(null);
+  const [lagCorrelationData, setLagCorrelationData] = useState<LagCorrelationResponse | null>(null);
+  const [hotspotsData, setHotspotsData] = useState<HotspotsResponse | null>(null);
   
   const [wellYearRange, setWellYearRange] = useState({ min: 1994, max: 2024 });
   
@@ -348,6 +727,10 @@ export default function Home() {
   const [showSummary, setShowSummary] = useState<boolean>(false);
   const [showStorage, setShowStorage] = useState<boolean>(false);
   
+  // ============= NEW: Advanced Module Toggle States =============
+  const [showAdvancedMenu, setShowAdvancedMenu] = useState<boolean>(false);
+  const [selectedAdvancedModule, setSelectedAdvancedModule] = useState<string>("");
+  
   const [districtGeo, setDistrictGeo] = useState<Geometry | null>(null);
   const [center, setCenter] = useState<[number, number]>([22.9734, 78.6569]);
   const [zoom, setZoom] = useState(5);
@@ -358,7 +741,6 @@ export default function Home() {
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<string>("");
   
-  // ============= UPDATED: View Selection =============
   const [timeseriesView, setTimeseriesView] = useState<"raw" | "seasonal" | "deseasonalized">("raw");
 
   const [alertMessage, setAlertMessage] = useState<string>("");
@@ -369,7 +751,7 @@ export default function Home() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
       role: "assistant",
-      content: "Hello! I'm your Groundwater and Remote Sensing expert. Ask me anything about GRACE data, rainfall patterns, groundwater levels, or aquifer systems!",
+      content: "Hello! I'm your Groundwater and Remote Sensing expert. Ask me anything about GRACE data, rainfall patterns, groundwater levels, aquifer systems, or advanced modules!",
       timestamp: new Date()
     }
   ]);
@@ -539,6 +921,116 @@ export default function Home() {
     { id: 'rainfall', name: 'Rainfall', icon: '🌧️', show: showRainfall, color: 'blue' },
     { id: 'wells', name: 'Wells', icon: '💧', show: showWells, color: 'red' }
   ].filter(layer => layer.show);
+
+  // ============= NEW: Advanced Module Loading Functions =============
+  const loadAdvancedModule = async (moduleName: string) => {
+    setIsLoading(true);
+    const params: any = {};
+    if (selectedState) params.state = selectedState;
+    if (selectedDistrict) params.district = selectedDistrict;
+    
+    try {
+      switch (moduleName) {
+        case 'ASI':
+          const asiRes = await axios.get<ASIResponse>(`${backendURL}/api/advanced/asi`, { params });
+          setAsiData(asiRes.data);
+          showAlert(`ASI Analysis: ${asiRes.data.count} aquifer polygons analyzed`, "success");
+          break;
+          
+        case 'NETWORK_DENSITY':
+          const netRes = await axios.get<NetworkDensityResponse>(`${backendURL}/api/advanced/network-density`, { params });
+          setNetworkDensityData(netRes.data);
+          showAlert(`Network Density: ${netRes.data.count} sites analyzed`, "success");
+          break;
+          
+        case 'SASS':
+          if (!selectedMonth) {
+            showAlert("Please select a month for SASS analysis", "warning");
+            setIsLoading(false);
+            return;
+          }
+          params.year = selectedYear;
+          params.month = selectedMonth;
+          const sassRes = await axios.get<SASSResponse>(`${backendURL}/api/advanced/sass`, { params });
+          setSassData(sassRes.data);
+          showAlert(`SASS: ${sassRes.data.count} sites with stress scores`, "success");
+          break;
+          
+        case 'GRACE_DIVERGENCE':
+          if (!selectedMonth) {
+            showAlert("Please select a month for divergence analysis", "warning");
+            setIsLoading(false);
+            return;
+          }
+          params.year = selectedYear;
+          params.month = selectedMonth;
+          const divRes = await axios.get<DivergenceResponse>(`${backendURL}/api/advanced/grace-divergence`, { params });
+          setDivergenceData(divRes.data);
+          showAlert(`Divergence: ${divRes.data.count} pixels analyzed`, "success");
+          break;
+          
+        case 'FORECAST':
+          const foreRes = await axios.get<ForecastResponse>(`${backendURL}/api/advanced/forecast`, { params });
+          setForecastData(foreRes.data);
+          showAlert(`Forecast: ${foreRes.data.count} months predicted`, "success");
+          break;
+          
+        case 'RECHARGE':
+          // Recharge planning requires year and month for site recommendations
+          if (!selectedMonth) {
+            showAlert("Please select a month for site-specific recharge recommendations", "warning");
+            // Still load without month for regional analysis
+            params.year = selectedYear;
+          } else {
+            params.year = selectedYear;
+            params.month = selectedMonth;
+          }
+          const rechRes = await axios.get<RechargeResponse>(`${backendURL}/api/advanced/recharge-planning`, { params });
+          setRechargeData(rechRes.data);
+          showAlert(`Recharge: ${rechRes.data.potential.total_recharge_potential_mcm.toFixed(2)} MCM potential`, "success");
+          break;
+
+          
+        case 'SIGNIFICANT_TRENDS':
+          const trendRes = await axios.get<SignificantTrendsResponse>(`${backendURL}/api/advanced/significant-trends`, { params });
+          setSignificantTrendsData(trendRes.data);
+          showAlert(`Significant Trends: ${trendRes.data.count} sites found`, "success");
+          break;
+          
+        case 'CHANGEPOINTS':
+          const cpRes = await axios.get<ChangepointResponse>(`${backendURL}/api/advanced/changepoints`, { params });
+          setChangepointsData(cpRes.data);
+          showAlert(`Changepoints: ${cpRes.data.changepoints.count} sites with breaks`, "success");
+          break;
+          
+        case 'LAG_CORRELATION':
+          const lagRes = await axios.get<LagCorrelationResponse>(`${backendURL}/api/advanced/lag-correlation`, { params });
+          setLagCorrelationData(lagRes.data);
+          showAlert(`Lag Correlation: ${lagRes.data.count} sites analyzed`, "success");
+          break;
+          
+        case 'HOTSPOTS':
+          const hotRes = await axios.get<HotspotsResponse>(`${backendURL}/api/advanced/hotspots`, { params });
+          setHotspotsData(hotRes.data);
+          showAlert(`Hotspots: ${hotRes.data.statistics.n_clusters} clusters found`, "success");
+          break;
+          
+        default:
+          showAlert("Unknown module selected", "warning");
+      }
+    } catch (error: any) {
+      console.error(`Error loading ${moduleName}:`, error);
+      showAlert(error.response?.data?.detail || `Error loading ${moduleName}`, "error");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedAdvancedModule) {
+      loadAdvancedModule(selectedAdvancedModule);
+    }
+  }, [selectedAdvancedModule, selectedState, selectedDistrict, selectedYear, selectedMonth]);
 
   useEffect(() => {
     axios.get<YearRangeResponse>(`${backendURL}/api/wells/years`)
@@ -712,7 +1204,6 @@ export default function Home() {
       .finally(() => setIsLoading(false));
   }, [showWells, selectedYear, selectedMonth, selectedSeason, selectedState, selectedDistrict]);
 
-  // ============= UPDATED: Timeseries Effect =============
   useEffect(() => {
     if (!showTimeseries) {
       setTimeseriesResponse(null);
@@ -726,7 +1217,7 @@ export default function Home() {
     axios.get<TimeseriesResponse>(`${backendURL}/api/wells/timeseries`, { params })
       .then(res => {
         setTimeseriesResponse(res.data);
-        showAlert(`Loaded ${res.data.count} time points (${res.data.view} view)`, "success");
+        showAlert(`Loaded unified timeseries: ${res.data.count} points (${res.data.view} view)`, "success");
       })
       .catch(err => showAlert("Error loading timeseries", "error"))
       .finally(() => setIsLoading(false));
@@ -982,786 +1473,1871 @@ export default function Home() {
     );
   };
 
-  return (
-    <main className="flex flex-col h-screen bg-gradient-to-br from-slate-50 to-slate-100">
-      {isLoading && (
-        <div className="absolute top-0 left-0 right-0 z-[2000] bg-gradient-to-r from-blue-600 to-blue-500 text-white text-center py-3 text-sm font-medium shadow-lg">
-          <div className="flex items-center justify-center gap-2">
-            <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
-            Loading data...
-          </div>
-        </div>
-      )}
+  // ============= NEW: Render Advanced Module Visualizations =============
+  const renderAdvancedModuleContent = () => {
+    if (!selectedAdvancedModule) return null;
 
-      {alertMessage && (
-        <div className={`
-          px-4 py-3 text-sm font-medium text-center z-[1999] shadow-md
-          ${alertType === "error" ? "bg-red-50 text-red-800 border-b-2 border-red-200" : ""}
-          ${alertType === "warning" ? "bg-yellow-50 text-yellow-800 border-b-2 border-yellow-200" : ""}
-          ${alertType === "success" ? "bg-green-50 text-green-800 border-b-2 border-green-200" : ""}
-          ${alertType === "info" ? "bg-blue-50 text-blue-800 border-b-2 border-blue-200" : ""}
-        `}>
-          {alertMessage}
-        </div>
-      )}
-
-      <div className="bg-white shadow-md border-b-2 border-gray-200">
-        <div className="px-6 py-4">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="bg-gradient-to-r from-blue-600 to-blue-500 text-white p-2 rounded-lg">
-              <span className="text-2xl">🗺️</span>
+    // ASI Visualization
+    if (selectedAdvancedModule === 'ASI' && asiData) {
+      return (
+        <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-purple-400">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">🔷</span>
+              <h3 className="text-lg font-bold text-gray-800">Aquifer Suitability Index (ASI)</h3>
             </div>
-            <div>
-              <h1 className="text-2xl font-bold text-gray-800">GeoHydro Dashboard</h1>
-              <p className="text-sm text-gray-500">Multi-layer Hydrogeological Analysis Platform with AI Assistant</p>
-            </div>
+            <span className="text-sm bg-purple-100 text-purple-800 px-3 py-1 rounded-full font-semibold">
+              {asiData.count} aquifer polygons
+            </span>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <select
-              value={selectedState}
-              onChange={(e) => {
-                const newState = e.target.value;
-                setSelectedState(newState);
-                setSelectedDistrict("");
+          {/* Statistics Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+            <div className="bg-purple-50 p-3 rounded-lg border border-purple-200">
+              <div className="text-xs text-gray-600 mb-1">Mean ASI</div>
+              <div className="text-2xl font-bold text-purple-600">{asiData.statistics.mean_asi.toFixed(2)}</div>
+            </div>
+            <div className="bg-green-50 p-3 rounded-lg border border-green-200">
+              <div className="text-xs text-gray-600 mb-1">Median</div>
+              <div className="text-2xl font-bold text-green-600">{asiData.statistics.median_asi.toFixed(2)}</div>
+            </div>
+            <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+              <div className="text-xs text-gray-600 mb-1">Range</div>
+              <div className="text-sm font-bold text-blue-600">
+                {asiData.statistics.min_asi.toFixed(1)}–{asiData.statistics.max_asi.toFixed(1)}
+              </div>
+            </div>
+            <div className="bg-orange-50 p-3 rounded-lg border border-orange-200">
+              <div className="text-xs text-gray-600 mb-1">Avg Sy</div>
+              <div className="text-xl font-bold text-orange-600">{asiData.statistics.avg_specific_yield.toFixed(4)}</div>
+            </div>
+            <div className="bg-teal-50 p-3 rounded-lg border border-teal-200">
+              <div className="text-xs text-gray-600 mb-1">Total Area</div>
+              <div className="text-lg font-bold text-teal-600">{asiData.statistics.total_area_km2.toFixed(0)} km²</div>
+            </div>
+          </div>
+
+          {/* Dominant Aquifer Info */}
+          <div className="bg-gradient-to-r from-purple-50 to-blue-50 p-3 rounded-lg border border-purple-200 mb-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-xs text-gray-600">Dominant Aquifer Type</div>
+                <div className="font-bold text-lg text-purple-700">{asiData.statistics.dominant_aquifer}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-xs text-gray-600">Normalization Range</div>
+                <div className="text-sm font-semibold text-gray-700">
+                  Sy: {asiData.methodology.quantile_stretch.low.toFixed(4)} – {asiData.methodology.quantile_stretch.high.toFixed(4)}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Map with Choropleth Polygons */}
+          <div className="h-[500px] relative rounded-lg overflow-hidden">
+            <MapContainer 
+              center={center} 
+              zoom={zoom} 
+              style={{ height: "100%", width: "100%" }} 
+              key={`asi-${mapKey}`}
+            >
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              
+              {/* District boundary */}
+              {districtGeo && (
+                <GeoJSON 
+                  data={districtGeo} 
+                  style={{ color: "#9333EA", weight: 3, fillOpacity: 0.05 }} 
+                />
+              )}
+              
+              {/* ASI Polygons (Choropleth) */}
+              {asiData.geojson.features.map((feature, i) => {
+                const asiScore = feature.properties.asi_score;
+                const fillColor = getASIColor(asiScore);
                 
-                if (!newState) {
-                  setCenter([22.9734, 78.6569]);
-                  setZoom(5);
-                  setDistrictGeo(null);
-                  setMapKey(prev => prev + 1);
-                }
-              }}
-              className="border-2 border-gray-300 px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-            >
-              <option value="">🌍 Select State</option>
-              {states.map((state, i) => (
-                <option key={i} value={state.State}>{state.State}</option>
-              ))}
-            </select>
+                return (
+                  <GeoJSON
+                    key={`asi_polygon_${feature.id}_${i}`}
+                    data={feature}
+                    style={{
+                      fillColor: fillColor,
+                      fillOpacity: 0.7,
+                      color: '#666',
+                      weight: 1,
+                      opacity: 0.8
+                    }}
+                    onEachFeature={(feature: any, layer: any) => {
+                      const props = feature.properties;
+                      const popupContent = `
+                        <div style="font-family: sans-serif; min-width: 220px;">
+                          <strong style="font-size: 15px; color: ${fillColor};">
+                            ASI Score: ${props.asi_score.toFixed(2)}/5
+                          </strong><br/>
+                          <hr style="margin: 5px 0; border: 1px solid #ddd;"/>
+                          <table style="width: 100%; font-size: 12px; margin-top: 5px;">
+                            <tbody>
+                              <tr><td><strong>Aquifer:</strong></td><td>${props.majoraquif || 'N/A'}</td></tr>
+                              <tr><td><strong>Specific Yield:</strong></td><td>${props.specific_yield.toFixed(4)}</td></tr>
+                              <tr><td><strong>Area:</strong></td><td>${(props.area_m2 / 1_000_000).toFixed(2)} km²</td></tr>
+                              <tr>
+                                <td><strong>Quality:</strong></td>
+                                <td style="font-weight: bold; color: ${fillColor};">
+                                  ${asiScore >= 4 ? 'Excellent' : 
+                                    asiScore >= 3 ? 'Good' : 
+                                    asiScore >= 2 ? 'Moderate' : 
+                                    asiScore >= 1 ? 'Fair' : 'Poor'}
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      `;
+                      
+                      layer.bindPopup(popupContent);
+                      
+                      // Highlight on hover
+                      layer.on('mouseover', function() {
+                        this.setStyle({
+                          weight: 3,
+                          color: '#333',
+                          fillOpacity: 0.9
+                        });
+                      });
+                      
+                      layer.on('mouseout', function() {
+                        this.setStyle({
+                          weight: 1,
+                          color: '#666',
+                          fillOpacity: 0.7
+                        });
+                      });
+                    }}
+                  />
+                );
+              })}
+            </MapContainer>
 
-            <select
-              value={selectedDistrict}
-              onChange={(e) => setSelectedDistrict(e.target.value)}
-              disabled={!districts.length}
-              className="border-2 border-gray-300 px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed bg-white"
-            >
-              <option value="">📍 Select District</option>
-              {districts.map((d, i) => (
-                <option key={i} value={d.district_name}>{d.district_name}</option>
-              ))}
-            </select>
-
-            <select
-              value={selectedYear}
-              onChange={(e) => setSelectedYear(Number(e.target.value))}
-              className="border-2 border-gray-300 px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-            >
-              {availableYears.map(year => (
-                <option key={year} value={year}>📅 {year}</option>
-              ))}
-            </select>
-
-            <select
-              value={selectedMonth || ""}
-              onChange={(e) => setSelectedMonth(e.target.value ? Number(e.target.value) : null)}
-              className="border-2 border-gray-300 px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-            >
-              <option value="">All Months</option>
-              {Array.from({ length: 12 }, (_, i) => i + 1).map(month => (
-                <option key={month} value={month}>
-                  {new Date(2000, month - 1).toLocaleString('default', { month: 'long' })}
-                </option>
-              ))}
-            </select>
-
-            {showRainfall && selectedMonth && (
-              <select
-                value={selectedDay || ""}
-                onChange={(e) => setSelectedDay(e.target.value ? Number(e.target.value) : null)}
-                className="border-2 border-gray-300 px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-              >
-                <option value="">All Days</option>
-                {Array.from({ length: 31 }, (_, i) => i + 1).map(day => (
-                  <option key={day} value={day}>Day {day}</option>
+            {/* Legend */}
+            <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-purple-300">
+              <div className="text-xs font-bold mb-2 text-purple-900">ASI Score (Storage Potential)</div>
+              <div className="space-y-1">
+                {[
+                  { label: 'Excellent (4-5)', score: 4.5, desc: 'Highest potential' },
+                  { label: 'Good (3-4)', score: 3.5, desc: 'High potential' },
+                  { label: 'Moderate (2-3)', score: 2.5, desc: 'Medium potential' },
+                  { label: 'Fair (1-2)', score: 1.5, desc: 'Low potential' },
+                  { label: 'Poor (0-1)', score: 0.5, desc: 'Very low potential' }
+                ].map((item, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <div 
+                      className="w-5 h-5 rounded border border-gray-400" 
+                      style={{ backgroundColor: getASIColor(item.score) }}
+                    ></div>
+                    <div className="flex flex-col">
+                      <span className="text-xs font-semibold">{item.label}</span>
+                      <span className="text-[10px] text-gray-500">{item.desc}</span>
+                    </div>
+                  </div>
                 ))}
-              </select>
-            )}
+              </div>
+            </div>
+          </div>
 
-            {showWells && (
-              <select
-                value={selectedSeason}
-                onChange={(e) => setSelectedSeason(e.target.value)}
-                className="border-2 border-gray-300 px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+          {/* Methodology and Interpretation */}
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+              <h4 className="font-bold text-sm mb-2 text-blue-900">📐 Methodology</h4>
+              <p className="text-xs text-blue-800">
+                <strong>Approach:</strong> {asiData.methodology.approach}
+                <br/><strong>Normalization:</strong> Quantile-based (5th-95th percentile) stretching to 0-5 scale
+                <br/><strong>Data Source:</strong> Specific yield from lithology or field measurements
+              </p>
+            </div>
+            
+            <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+              <h4 className="font-bold text-sm mb-2 text-green-900">💡 Interpretation</h4>
+              <p className="text-xs text-green-800">
+                {asiData.methodology.interpretation}
+                <br/><br/><strong>⚠️ Note:</strong> ASI is a screening-level indicator. Combine with stress maps and field data for final decisions.
+              </p>
+            </div>
+          </div>
+
+          {/* Quick Stats Summary */}
+          <div className="mt-4 p-4 bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-200 rounded-lg">
+            <h4 className="font-bold text-sm mb-2 text-purple-900">📊 Statistical Summary</h4>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <div>
+                <div className="text-gray-600">Polygons Analyzed</div>
+                <div className="font-bold text-lg text-purple-700">{asiData.count}</div>
+              </div>
+              <div>
+                <div className="text-gray-600">Mean ± Std</div>
+                <div className="font-bold text-lg text-purple-700">
+                  {asiData.statistics.mean_asi.toFixed(2)} ± {asiData.statistics.std_asi.toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-600">High Quality (&gt;3)</div>
+                <div className="font-bold text-lg text-green-700">
+                  {asiData.geojson.features.filter(f => f.properties.asi_score > 3).length}
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-600">Low Quality (&lt;2)</div>
+                <div className="font-bold text-lg text-red-700">
+                  {asiData.geojson.features.filter(f => f.properties.asi_score < 2).length}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    // Network Density Visualization
+    if (selectedAdvancedModule === 'NETWORK_DENSITY' && networkDensityData) {
+      return (
+        <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-indigo-400">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">📊</span>
+              <h3 className="text-lg font-bold text-gray-800">Well Network Density Analysis</h3>
+            </div>
+            <span className="text-sm bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full font-semibold">
+              {networkDensityData.count} sites
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+            <div className="bg-indigo-50 p-3 rounded-lg border border-indigo-200">
+              <div className="text-xs text-gray-600 mb-1">Total Sites</div>
+              <div className="text-2xl font-bold text-indigo-600">{networkDensityData.statistics.total_sites}</div>
+            </div>
+            <div className="bg-purple-50 p-3 rounded-lg border border-purple-200">
+              <div className="text-xs text-gray-600 mb-1">Avg Strength</div>
+              <div className="text-2xl font-bold text-purple-600">{networkDensityData.statistics.avg_strength.toFixed(3)}</div>
+            </div>
+            <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+              <div className="text-xs text-gray-600 mb-1">Avg Density</div>
+              <div className="text-xl font-bold text-blue-600">{networkDensityData.statistics.avg_density.toFixed(4)} /km²</div>
+            </div>
+            <div className="bg-green-50 p-3 rounded-lg border border-green-200">
+              <div className="text-xs text-gray-600 mb-1">Median Obs</div>
+              <div className="text-2xl font-bold text-green-600">{networkDensityData.statistics.median_observations}</div>
+            </div>
+          </div>
+
+          <div className="h-[500px] relative rounded-lg overflow-hidden">
+            <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`network-${mapKey}`}>
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#6366F1", weight: 3, fillOpacity: 0.1 }} />}
+              
+              {networkDensityData.data.map((point, i) => {
+                const size = 4 + (point.local_density_per_km2 * 100);
+                return (
+                  <CircleMarker
+                    key={`net_${i}`}
+                    center={[point.latitude, point.longitude]}
+                    radius={Math.min(size, 15)}
+                    fillColor="#6366F1"
+                    color="white"
+                    weight={1}
+                    fillOpacity={0.7}
+                  >
+                    <Popup>
+                      <div style={{ fontFamily: 'sans-serif', minWidth: '200px' }}>
+                        <strong>Site: {point.site_id}</strong><br/>
+                        <hr style={{ margin: '5px 0' }}/>
+                        <table style={{ width: '100%', fontSize: '12px' }}>
+                          <tbody>
+                            <tr><td><strong>Strength:</strong></td><td>{point.strength.toFixed(3)}</td></tr>
+                            <tr><td><strong>Density:</strong></td><td>{point.local_density_per_km2.toFixed(4)} /km²</td></tr>
+                            <tr><td><strong>Neighbors:</strong></td><td>{point.neighbors_within_radius} within {networkDensityData.parameters.radius_km}km</td></tr>
+                            <tr><td><strong>Observations:</strong></td><td>{point.n_observations}</td></tr>
+                            <tr><td><strong>Trend:</strong></td><td>{point.slope_m_per_year.toFixed(4)} m/yr</td></tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                );
+              })}
+            </MapContainer>
+
+            <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-indigo-300">
+              <div className="text-xs font-bold mb-2">Symbol Size = Density</div>
+              <p className="text-xs text-gray-600">Larger circles indicate higher local well density within {networkDensityData.parameters.radius_km}km radius</p>
+            </div>
+          </div>
+
+          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <p className="text-sm text-blue-800">
+              <strong>ℹ️ What:</strong> Signal strength (|slope|/σ) with symbol size as local network density.
+              <br/><strong>How:</strong> Annualized GWL slope normalized by site variability; density computed within {networkDensityData.parameters.radius_km} km.
+              <br/><strong>Significance:</strong> Find robust signal corridors (strong + dense) and blind spots (weak or sparse).
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // SASS Visualization
+    if (selectedAdvancedModule === 'SASS' && sassData) {
+      return (
+        <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-red-400">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">⚠️</span>
+              <h3 className="text-lg font-bold text-gray-800">Spatio-Temporal Aquifer Stress Score (SASS)</h3>
+            </div>
+            <span className="text-sm bg-red-100 text-red-800 px-3 py-1 rounded-full font-semibold">
+              {sassData.statistics.stressed_sites} stressed sites
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+            <div className="bg-red-50 p-3 rounded-lg border border-red-200">
+              <div className="text-xs text-gray-600 mb-1">Mean SASS</div>
+              <div className="text-2xl font-bold text-red-600">{sassData.statistics.mean_sass.toFixed(3)}</div>
+            </div>
+            <div className="bg-orange-50 p-3 rounded-lg border border-orange-200">
+              <div className="text-xs text-gray-600 mb-1">Max Stress</div>
+              <div className="text-2xl font-bold text-orange-600">{sassData.statistics.max_sass.toFixed(3)}</div>
+            </div>
+            <div className="bg-green-50 p-3 rounded-lg border border-green-200">
+              <div className="text-xs text-gray-600 mb-1">Min Stress</div>
+              <div className="text-2xl font-bold text-green-600">{sassData.statistics.min_sass.toFixed(3)}</div>
+            </div>
+            <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-200">
+              <div className="text-xs text-gray-600 mb-1">Stressed Sites</div>
+              <div className="text-2xl font-bold text-yellow-600">{sassData.statistics.stressed_sites}</div>
+            </div>
+          </div>
+
+          <div className="h-[500px] relative rounded-lg overflow-hidden">
+            <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`sass-${mapKey}`}>
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#DC2626", weight: 3, fillOpacity: 0.1 }} />}
+              
+              {sassData.data.map((point, i) => (
+                <CircleMarker
+                  key={`sass_${i}`}
+                  center={[point.latitude, point.longitude]}
+                  radius={8}
+                  fillColor={getSASSColor(point.sass_score)}
+                  color="white"
+                  weight={2}
+                  fillOpacity={0.8}
+                >
+                  <Popup>
+                    <div style={{ fontFamily: 'sans-serif', minWidth: '200px' }}>
+                      <strong style={{ fontSize: '14px', color: getSASSColor(point.sass_score) }}>SASS: {point.sass_score.toFixed(3)}</strong><br/>
+                      <hr style={{ margin: '5px 0' }}/>
+                      <table style={{ width: '100%', fontSize: '12px' }}>
+                        <tbody>
+                          <tr><td><strong>GWL Stress:</strong></td><td>{point.gwl_stress.toFixed(3)}</td></tr>
+                          <tr><td><strong>GRACE z:</strong></td><td>{point.grace_z.toFixed(3)}</td></tr>
+                          <tr><td><strong>Rain z:</strong></td><td>{point.rain_z.toFixed(3)}</td></tr>
+                          <tr><td><strong>GWL:</strong></td><td>{point.gwl.toFixed(2)} m</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </Popup>
+                </CircleMarker>
+              ))}
+            </MapContainer>
+
+            <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-red-300">
+              <div className="text-xs font-bold mb-2">SASS Score</div>
+              <div className="space-y-1">
+                {[
+                  { label: 'Critical (>2)', score: 2.5 },
+                  { label: 'High (1-2)', score: 1.5 },
+                  { label: 'Moderate (0-1)', score: 0.5 },
+                  { label: 'Low (-1-0)', score: -0.5 },
+                  { label: 'Minimal (<-1)', score: -1.5 }
+                ].map((item, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded" style={{ backgroundColor: getSASSColor(item.score) }}></div>
+                    <span className="text-xs">{item.label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <p className="text-sm text-blue-800">
+              <strong>Formula:</strong> {sassData.formula}
+              <br/><strong>Significance:</strong> Composite stress index using wells + GRACE + rainfall. Higher values indicate more stress.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // Forecast Visualization (with Plotly chart)
+if (selectedAdvancedModule === 'FORECAST' && forecastData) {
+  return (
+    <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-teal-400">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <span className="text-2xl">📈</span>
+          <h3 className="text-lg font-bold text-gray-800">GWL Forecasting (Grid-based)</h3>
+        </div>
+        <span className="text-sm bg-teal-100 text-teal-800 px-3 py-1 rounded-full font-semibold">
+          {forecastData.count} grid cells
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+        <div className="bg-teal-50 p-3 rounded-lg border border-teal-200">
+          <div className="text-xs text-gray-600 mb-1">Mean Change (12mo)</div>
+          <div className={`text-2xl font-bold ${forecastData.statistics.mean_change_m > 0 ? 'text-red-600' : 'text-green-600'}`}>
+            {forecastData.statistics.mean_change_m > 0 ? '+' : ''}{forecastData.statistics.mean_change_m.toFixed(3)} m
+          </div>
+        </div>
+        <div className="bg-red-50 p-3 rounded-lg border border-red-200">
+          <div className="text-xs text-gray-600 mb-1">Declining Cells</div>
+          <div className="text-2xl font-bold text-red-600">{forecastData.statistics.declining_cells}</div>
+        </div>
+        <div className="bg-green-50 p-3 rounded-lg border border-green-200">
+          <div className="text-xs text-gray-600 mb-1">Recovering Cells</div>
+          <div className="text-2xl font-bold text-green-600">{forecastData.statistics.recovering_cells}</div>
+        </div>
+        <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+          <div className="text-xs text-gray-600 mb-1">Mean R²</div>
+          <div className="text-2xl font-bold text-blue-600">{forecastData.statistics.mean_r_squared.toFixed(3)}</div>
+        </div>
+      </div>
+
+      <div className="bg-indigo-50 rounded-lg p-3 border border-indigo-200 mb-4">
+        <h4 className="font-bold text-sm mb-2 text-indigo-900">Forecast Parameters</h4>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+          <div><strong>Horizon:</strong> {forecastData.parameters.forecast_months} months</div>
+          <div><strong>Neighbors (k):</strong> {forecastData.parameters.k_neighbors}</div>
+          <div><strong>Grid Resolution:</strong> {forecastData.parameters.grid_resolution}×{forecastData.parameters.grid_resolution}</div>
+          <div><strong>GRACE Used:</strong> {forecastData.parameters.grace_used ? '✅ Yes' : '❌ No'}</div>
+          <div><strong>Method:</strong> {forecastData.method}</div>
+          <div><strong>Success Rate:</strong> {forecastData.statistics.success_rate.toFixed(1)}%</div>
+        </div>
+      </div>
+
+      {/* Map Visualization */}
+      <div className="h-[500px] relative rounded-lg overflow-hidden mb-4">
+        <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`forecast-${mapKey}`}>
+          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+          {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#14B8A6", weight: 3, fillOpacity: 0.1 }} />}
+          
+          {forecastData.data.map((point, i) => {
+            // Color: Red = deeper (decline), Green = shallower (recovery)
+            const getColor = (change: number) => {
+              if (change > 2) return '#7F1D1D';      // Very deep decline
+              if (change > 1) return '#DC2626';      // Strong decline
+              if (change > 0.5) return '#F87171';    // Moderate decline
+              if (change > 0) return '#FCA5A5';      // Slight decline
+              if (change > -0.5) return '#BBF7D0';   // Slight recovery
+              if (change > -1) return '#86EFAC';     // Moderate recovery
+              if (change > -2) return '#22C55E';     // Strong recovery
+              return '#15803D';                       // Very strong recovery
+            };
+
+            return (
+              <CircleMarker
+                key={`forecast_${i}`}
+                center={[point.latitude, point.longitude]}
+                radius={5}
+                fillColor={getColor(point.pred_delta_m)}
+                color="white"
+                weight={1}
+                fillOpacity={0.8}
               >
-                <option value="">🌦️ All Seasons</option>
-                <option value="PREMONSOON">Pre-Monsoon</option>
-                <option value="MONSOON">Monsoon</option>
-                <option value="POSTMONS_1">Post-Monsoon</option>
-              </select>
-            )}
+                <Popup>
+                  <div style={{ fontFamily: 'sans-serif', minWidth: '220px' }}>
+                    <strong style={{ fontSize: '14px', color: getColor(point.pred_delta_m) }}>
+                      Forecast: {point.pred_delta_m > 0 ? '+' : ''}{point.pred_delta_m.toFixed(3)} m
+                    </strong><br/>
+                    <hr style={{ margin: '5px 0' }}/>
+                    <table style={{ width: '100%', fontSize: '12px' }}>
+                      <tbody>
+                        <tr><td><strong>Current GWL:</strong></td><td>{point.current_gwl.toFixed(2)} m bgl</td></tr>
+                        <tr><td><strong>Forecast GWL:</strong></td><td>{point.forecast_gwl.toFixed(2)} m bgl</td></tr>
+                        <tr><td><strong>Trend Component:</strong></td><td>{point.trend_component.toFixed(3)} m</td></tr>
+                        <tr><td><strong>GRACE Component:</strong></td><td>{point.grace_component.toFixed(3)} m</td></tr>
+                        <tr><td><strong>Model R²:</strong></td><td>{point.r_squared.toFixed(3)}</td></tr>
+                        <tr><td><strong>Training Data:</strong></td><td>{point.n_months_training} months</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </Popup>
+              </CircleMarker>
+            );
+          })}
+        </MapContainer>
 
-            <div className="flex gap-2 ml-auto border-l-2 border-gray-200 pl-4">
+        <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-teal-300">
+          <div className="text-xs font-bold mb-2">12-Month Change (m)</div>
+          <div className="space-y-1">
+            {[
+              { label: 'Strong Decline (>2m)', change: 2.5 },
+              { label: 'Moderate Decline (1-2m)', change: 1.5 },
+              { label: 'Slight Decline (0-1m)', change: 0.5 },
+              { label: 'Slight Recovery (0 to -1m)', change: -0.5 },
+              { label: 'Moderate Recovery (-1 to -2m)', change: -1.5 },
+              { label: 'Strong Recovery (<-2m)', change: -2.5 }
+            ].map((item, idx) => {
+              const getColor = (change: number) => {
+                if (change > 2) return '#7F1D1D';
+                if (change > 1) return '#DC2626';
+                if (change > 0.5) return '#F87171';
+                if (change > 0) return '#FCA5A5';
+                if (change > -0.5) return '#BBF7D0';
+                if (change > -1) return '#86EFAC';
+                if (change > -2) return '#22C55E';
+                return '#15803D';
+              };
+              return (
+                <div key={idx} className="flex items-center gap-2">
+                  <div className="w-4 h-4 rounded" style={{ backgroundColor: getColor(item.change) }}></div>
+                  <span className="text-xs">{item.label}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Summary Statistics Table */}
+      <div className="bg-gradient-to-r from-teal-50 to-green-50 p-4 rounded-lg border border-teal-200">
+        <h4 className="font-bold text-sm mb-3 text-teal-900">Grid Statistics</h4>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <div className="bg-white p-2 rounded border border-gray-200">
+            <div className="text-xs text-gray-600">Total Cells</div>
+            <div className="text-lg font-bold text-gray-800">{forecastData.count}</div>
+          </div>
+          <div className="bg-white p-2 rounded border border-gray-200">
+            <div className="text-xs text-gray-600">Median Change</div>
+            <div className={`text-lg font-bold ${forecastData.statistics.median_change_m > 0 ? 'text-red-600' : 'text-green-600'}`}>
+              {forecastData.statistics.median_change_m > 0 ? '+' : ''}{forecastData.statistics.median_change_m.toFixed(3)} m
+            </div>
+          </div>
+          <div className="bg-white p-2 rounded border border-gray-200">
+            <div className="text-xs text-gray-600">Decline/Recovery Ratio</div>
+            <div className="text-lg font-bold text-gray-800">
+              {(forecastData.statistics.declining_cells / Math.max(forecastData.statistics.recovering_cells, 1)).toFixed(2)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+        <p className="text-sm text-blue-800">
+          <strong>ℹ️ What:</strong> Grid-based 12-month GWL forecast using neighbor-weighted wells + GRACE anomaly.
+          <br/><strong>How:</strong> KNN distance-weighted composite per cell → deseasonalize GWL + GRACE → OLS (trend + GRACE) → add back seasonality.
+          <br/><strong>Significance:</strong> Red cells = declining (deeper), Green = recovering (shallower). Assumes linear trend + stationary seasonality.
+          <br/><strong>⚠️ Note:</strong> This is a SPATIAL forecast (grid of points), not a TIME forecast (single location over time).
+        </p>
+      </div>
+    </div>
+  );
+}
+
+if (selectedAdvancedModule === 'RECHARGE' && rechargeData) {
+  return (
+    <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-cyan-400">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <span className="text-2xl">💧</span>
+          <h3 className="text-lg font-bold text-gray-800">Managed Aquifer Recharge (MAR) Planning</h3>
+        </div>
+        <span className="text-sm bg-cyan-100 text-cyan-800 px-3 py-1 rounded-full font-semibold">
+          {rechargeData.potential.total_recharge_potential_mcm.toFixed(2)} MCM potential
+        </span>
+      </div>
+
+      {/* Analysis Parameters */}
+      <div className="bg-gradient-to-r from-cyan-50 to-blue-50 p-4 rounded-lg border border-cyan-200 mb-4">
+        <h4 className="font-bold text-sm mb-3 text-cyan-900">Analysis Parameters</h4>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+          <div><strong>Area:</strong> {rechargeData.analysis_parameters.area_km2} km²</div>
+          <div><strong>Dominant Lithology:</strong> {rechargeData.analysis_parameters.dominant_lithology}</div>
+          <div><strong>Runoff Coeff:</strong> {rechargeData.analysis_parameters.runoff_coefficient}</div>
+          <div><strong>Monsoon Rainfall:</strong> {rechargeData.analysis_parameters.monsoon_rainfall_m.toFixed(3)} m</div>
+          <div><strong>Capture Fraction:</strong> {(rechargeData.analysis_parameters.capture_fraction * 100).toFixed(1)}%</div>
+          <div><strong>Year Analyzed:</strong> {rechargeData.analysis_parameters.year_analyzed}</div>
+        </div>
+      </div>
+
+      {/* Recharge Potential */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        <div className="bg-cyan-50 p-4 rounded-lg border border-cyan-200">
+          <div className="text-xs text-gray-600 mb-1">Total Recharge Potential</div>
+          <div className="text-3xl font-bold text-cyan-600">{rechargeData.potential.total_recharge_potential_mcm.toFixed(2)} MCM</div>
+          <div className="text-xs text-gray-500 mt-1">Million Cubic Meters</div>
+        </div>
+        <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+          <div className="text-xs text-gray-600 mb-1">Per km² Potential</div>
+          <div className="text-3xl font-bold text-blue-600">{rechargeData.potential.per_km2_mcm.toFixed(4)} MCM/km²</div>
+          <div className="text-xs text-gray-500 mt-1">Normalized by area</div>
+        </div>
+      </div>
+
+      {/* Structure Plan */}
+      <div className="bg-white border-2 border-cyan-200 rounded-lg p-4 mb-4">
+        <h4 className="font-bold text-sm mb-3 text-cyan-900">📋 Recommended Structure Plan</h4>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-cyan-50">
+              <tr>
+                <th className="text-left p-2 border-b-2 border-cyan-200">Structure Type</th>
+                <th className="text-center p-2 border-b-2 border-cyan-200">Units</th>
+                <th className="text-center p-2 border-b-2 border-cyan-200">Total Capacity (MCM)</th>
+                <th className="text-center p-2 border-b-2 border-cyan-200">Allocation (%)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rechargeData.structure_plan.map((structure, idx) => (
+                <tr key={idx} className={idx % 2 === 0 ? 'bg-gray-50' : 'bg-white'}>
+                  <td className="p-2 border-b border-gray-200 font-medium">{structure.structure_type}</td>
+                  <td className="p-2 border-b border-gray-200 text-center">{structure.recommended_units}</td>
+                  <td className="p-2 border-b border-gray-200 text-center font-semibold text-cyan-600">
+                    {structure.total_capacity_mcm.toFixed(3)}
+                  </td>
+                  <td className="p-2 border-b border-gray-200 text-center">
+                    {(structure.allocation_fraction * 100).toFixed(0)}%
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Site-Specific Recommendations Map */}
+      {rechargeData.site_recommendations.length > 0 && (
+        <>
+          <div className="mb-4">
+            <h4 className="font-bold text-sm mb-2 text-cyan-900">🎯 Site-Specific Recommendations ({rechargeData.count} sites)</h4>
+            <p className="text-xs text-gray-600">Based on current groundwater stress levels</p>
+          </div>
+
+          <div className="h-[500px] relative rounded-lg overflow-hidden">
+            <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`recharge-${mapKey}`}>
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#06B6D4", weight: 3, fillOpacity: 0.1 }} />}
+              
+              {rechargeData.site_recommendations.map((site, i) => {
+                const getStressColor = (category: string) => {
+                  switch (category) {
+                    case 'Critical': return '#DC2626';
+                    case 'Stressed': return '#F59E0B';
+                    case 'Moderate': return '#FCD34D';
+                    case 'Healthy': return '#22C55E';
+                    default: return '#9CA3AF';
+                  }
+                };
+
+                return (
+                  <CircleMarker
+                    key={`recharge_${i}`}
+                    center={[site.latitude, site.longitude]}
+                    radius={8}
+                    fillColor={getStressColor(site.stress_category)}
+                    color="white"
+                    weight={2}
+                    fillOpacity={0.8}
+                  >
+                    <Popup>
+                      <div style={{ fontFamily: 'sans-serif', minWidth: '220px' }}>
+                        <strong style={{ fontSize: '14px', color: getStressColor(site.stress_category) }}>
+                          {site.stress_category} Site
+                        </strong><br/>
+                        <hr style={{ margin: '5px 0' }}/>
+                        <table style={{ width: '100%', fontSize: '12px' }}>
+                          <tbody>
+                            <tr><td><strong>Site ID:</strong></td><td>{site.site_id}</td></tr>
+                            <tr><td><strong>Current GWL:</strong></td><td>{site.current_gwl.toFixed(2)} m bgl</td></tr>
+                            <tr><td><strong>Stress Level:</strong></td><td>{site.stress_category}</td></tr>
+                            <tr>
+                              <td><strong>Recommended:</strong></td>
+                              <td className="font-semibold text-cyan-600">{site.recommended_structure}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                );
+              })}
+            </MapContainer>
+
+            {/* Legend */}
+            <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-cyan-300">
+              <div className="text-xs font-bold mb-2">Stress Category</div>
+              <div className="space-y-1">
+                {[
+                  { label: 'Critical', category: 'Critical', structure: 'Recharge shaft' },
+                  { label: 'Stressed', category: 'Stressed', structure: 'Check dam' },
+                  { label: 'Moderate', category: 'Moderate', structure: 'Farm pond' },
+                  { label: 'Healthy', category: 'Healthy', structure: 'Percolation tank' }
+                ].map((item, idx) => {
+                  const getStressColor = (category: string) => {
+                    switch (category) {
+                      case 'Critical': return '#DC2626';
+                      case 'Stressed': return '#F59E0B';
+                      case 'Moderate': return '#FCD34D';
+                      case 'Healthy': return '#22C55E';
+                      default: return '#9CA3AF';
+                    }
+                  };
+
+                  return (
+                    <div key={idx} className="flex flex-col gap-1">
+                      <div className="flex items-center gap-2">
+                        <div className="w-4 h-4 rounded" style={{ backgroundColor: getStressColor(item.category) }}></div>
+                        <span className="text-xs font-semibold">{item.label}</span>
+                      </div>
+                      <div className="text-xs text-gray-600 ml-6">→ {item.structure}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* No site recommendations message */}
+      {rechargeData.site_recommendations.length === 0 && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
+          <p className="text-sm text-yellow-800">
+            ℹ️ No site-specific recommendations available. 
+            {!rechargeData.filters.month && " Select a month to enable site-level stress analysis and recommendations."}
+          </p>
+        </div>
+      )}
+
+      {/* Formula and Explanation */}
+      <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+        <h4 className="font-bold text-sm mb-2 text-blue-900">📐 Calculation Method</h4>
+        <p className="text-sm text-blue-800 mb-2">
+          <strong>Recharge Potential (MCM):</strong>
+        </p>
+        <div className="bg-white p-3 rounded border border-blue-300 font-mono text-xs mb-3">
+          V = (Area_km² × 10⁶) × Rainfall_m × Runoff_Coeff × Capture_Fraction
+        </div>
+        <p className="text-xs text-blue-700 mb-3">
+          <strong>Where:</strong><br/>
+          • <strong>Area:</strong> Total aquifer area ({rechargeData.analysis_parameters.area_km2} km²)<br/>
+          • <strong>Rainfall:</strong> Monsoon average ({rechargeData.analysis_parameters.monsoon_rainfall_m.toFixed(3)} m)<br/>
+          • <strong>Runoff Coeff:</strong> Based on {rechargeData.analysis_parameters.dominant_lithology} ({rechargeData.analysis_parameters.runoff_coefficient})<br/>
+          • <strong>Capture Fraction:</strong> Efficiency factor ({(rechargeData.analysis_parameters.capture_fraction * 100).toFixed(0)}%)
+        </p>
+        
+        <p className="text-sm text-blue-800 mb-2">
+          <strong>📊 Structure Allocation:</strong>
+        </p>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+          {rechargeData.structure_plan.map((s, idx) => (
+            <div key={idx} className="bg-white p-2 rounded border border-blue-200">
+              <div className="font-semibold truncate">{s.structure_type}</div>
+              <div className="text-gray-600">{(s.allocation_fraction * 100).toFixed(0)}% allocation</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-3 pt-3 border-t border-blue-300">
+          <p className="text-sm text-blue-800">
+            <strong>🎯 Site Recommendations:</strong> Based on negative z-score of current GWL<br/>
+            • <strong>Critical:</strong> Very deep GWL → Recharge shaft (fast infiltration)<br/>
+            • <strong>Stressed:</strong> Deep GWL → Check dam (moderate recharge)<br/>
+            • <strong>Moderate:</strong> Medium GWL → Farm pond (localized storage)<br/>
+            • <strong>Healthy:</strong> Shallow GWL → Percolation tank (preventive recharge)
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+    // Significant Trends Visualization
+    if (selectedAdvancedModule === 'SIGNIFICANT_TRENDS' && significantTrendsData) {
+      return (
+        <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-green-400">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">📉</span>
+              <h3 className="text-lg font-bold text-gray-800">Statistically Significant Trends</h3>
+            </div>
+            <span className="text-sm bg-green-100 text-green-800 px-3 py-1 rounded-full font-semibold">
+              {significantTrendsData.count} sites (p &lt; {significantTrendsData.parameters.p_threshold})
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+            <div className="bg-red-50 p-3 rounded-lg border border-red-200">
+              <div className="text-xs text-gray-600 mb-1">Declining</div>
+              <div className="text-2xl font-bold text-red-
+              600">{significantTrendsData.statistics.declining}</div>
+            </div>
+            <div className="bg-green-50 p-3 rounded-lg border border-green-200">
+              <div className="text-xs text-gray-600 mb-1">Recovering</div>
+              <div className="text-2xl font-bold text-green-600">{significantTrendsData.statistics.recovering}</div>
+            </div>
+            <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+              <div className="text-xs text-gray-600 mb-1">Mean Slope</div>
+              <div className="text-xl font-bold text-blue-600">{significantTrendsData.statistics.mean_slope.toFixed(4)} m/yr</div>
+            </div>
+            <div className="bg-purple-50 p-3 rounded-lg border border-purple-200">
+              <div className="text-xs text-gray-600 mb-1">High Significance</div>
+              <div className="text-2xl font-bold text-purple-600">{significantTrendsData.statistics.high_significance}</div>
+            </div>
+          </div>
+
+          <div className="h-[500px] relative rounded-lg overflow-hidden">
+            <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`trends-${mapKey}`}>
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#22C55E", weight: 3, fillOpacity: 0.1 }} />}
+              
+              {significantTrendsData.data.map((point, i) => (
+                <CircleMarker
+                  key={`trend_${i}`}
+                  center={[point.latitude, point.longitude]}
+                  radius={7}
+                  fillColor={getTrendColor(point.slope_m_per_year)}
+                  color="white"
+                  weight={2}
+                  fillOpacity={0.8}
+                >
+                  <Popup>
+                    <div style={{ fontFamily: 'sans-serif', minWidth: '220px' }}>
+                      <strong style={{ color: getTrendColor(point.slope_m_per_year) }}>
+                        {point.trend_direction}: {Math.abs(point.slope_m_per_year).toFixed(4)} m/yr
+                      </strong><br/>
+                      <hr style={{ margin: '5px 0' }}/>
+                      <table style={{ width: '100%', fontSize: '12px' }}>
+                        <tbody>
+                          <tr><td><strong>Site ID:</strong></td><td>{point.site_id}</td></tr>
+                          <tr><td><strong>p-value:</strong></td><td>{point.p_value.toFixed(6)}</td></tr>
+                          <tr><td><strong>Significance:</strong></td><td>{point.significance_level}</td></tr>
+                          <tr><td><strong>Data Points:</strong></td><td>{point.n_months} months</td></tr>
+                          <tr><td><strong>Period:</strong></td><td>{point.date_range}</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </Popup>
+                </CircleMarker>
+              ))}
+            </MapContainer>
+
+            <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-green-300">
+              <div className="text-xs font-bold mb-2">Trend Direction</div>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <div className="w-4 h-4 rounded-full" style={{ backgroundColor: '#DC2626' }}></div>
+                  <span className="text-xs">Declining (p &lt; {significantTrendsData.parameters.p_threshold})</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-4 h-4 rounded-full" style={{ backgroundColor: '#16A34A' }}></div>
+                  <span className="text-xs">Recovering (p &lt; {significantTrendsData.parameters.p_threshold})</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <p className="text-sm text-blue-800">
+              <strong>ℹ️ What:</strong> Sites with statistically robust trends (Mann-Kendall or OLS with p &lt; {significantTrendsData.parameters.p_threshold}).
+              <br/><strong>How:</strong> {significantTrendsData.parameters.method === 'mann_kendall' ? 'Mann-Kendall test' : 'OLS regression'} applied to annualized GWL slopes.
+              <br/><strong>Significance:</strong> Focus interventions on sites with verified declining trends.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // Changepoints Visualization
+    if (selectedAdvancedModule === 'CHANGEPOINTS' && changepointsData) {
+      return (
+        <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-yellow-400">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">📍</span>
+              <h3 className="text-lg font-bold text-gray-800">Changepoint Detection</h3>
+            </div>
+            <span className="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full font-semibold">
+              {changepointsData.changepoints.count} sites with breakpoints
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+            <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-200">
+              <div className="text-xs text-gray-600 mb-1">Total Sites</div>
+              <div className="text-2xl font-bold text-yellow-600">{changepointsData.statistics.total_sites_analyzed}</div>
+            </div>
+            <div className="bg-orange-50 p-3 rounded-lg border border-orange-200">
+              <div className="text-xs text-gray-600 mb-1">With Changepoints</div>
+              <div className="text-2xl font-bold text-orange-600">{changepointsData.statistics.sites_with_changepoints}</div>
+            </div>
+            <div className="bg-red-50 p-3 rounded-lg border border-red-200">
+              <div className="text-xs text-gray-600 mb-1">Detection Rate</div>
+              <div className="text-2xl font-bold text-red-600">{(changepointsData.statistics.detection_rate * 100).toFixed(1)}%</div>
+            </div>
+            <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+              <div className="text-xs text-gray-600 mb-1">Avg Series Length</div>
+              <div className="text-xl font-bold text-blue-600">{changepointsData.statistics.avg_series_length.toFixed(0)} months</div>
+            </div>
+          </div>
+
+          <div className="h-[500px] relative rounded-lg overflow-hidden">
+            <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`changepoints-${mapKey}`}>
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#EAB308", weight: 3, fillOpacity: 0.1 }} />}
+              
+              {changepointsData.changepoints.data.map((site, i) => {
+                const size = 5 + Math.min(site.n_breakpoints * 2, 10);
+                return (
+                  <CircleMarker
+                    key={`cp_${i}`}
+                    center={[site.latitude, site.longitude]}
+                    radius={size}
+                    fillColor="#EAB308"
+                    color="white"
+                    weight={2}
+                    fillOpacity={0.8}
+                  >
+                    <Popup>
+                      <div style={{ fontFamily: 'sans-serif', minWidth: '220px' }}>
+                        <strong style={{ color: '#EAB308' }}>Changepoint Detected</strong><br/>
+                        <hr style={{ margin: '5px 0' }}/>
+                        <table style={{ width: '100%', fontSize: '12px' }}>
+                          <tbody>
+                            <tr><td><strong>Site ID:</strong></td><td>{site.site_id}</td></tr>
+                            <tr><td><strong>Primary Break:</strong></td><td>{new Date(site.changepoint_date).toLocaleDateString()}</td></tr>
+                            <tr><td><strong>Total Breaks:</strong></td><td>{site.n_breakpoints}</td></tr>
+                            <tr><td><strong>Series Length:</strong></td><td>{site.series_length} months</td></tr>
+                          </tbody>
+                        </table>
+                        {site.all_breakpoints.length > 1 && (
+                          <>
+                            <hr style={{ margin: '5px 0' }}/>
+                            <div style={{ fontSize: '11px', color: '#666' }}>
+                              <strong>All Breakpoints:</strong><br/>
+                              {site.all_breakpoints.map((bp, idx) => (
+                                <div key={idx}>• {new Date(bp).toLocaleDateString()}</div>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                );
+              })}
+            </MapContainer>
+
+            <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-yellow-300">
+              <div className="text-xs font-bold mb-2">Symbol Size = # Breakpoints</div>
+              <p className="text-xs text-gray-600">Larger circles indicate more structural breaks detected in GWL timeseries</p>
+            </div>
+          </div>
+
+          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <p className="text-sm text-blue-800">
+              <strong>ℹ️ What:</strong> Structural breaks in GWL timeseries using PELT algorithm.
+              <br/><strong>How:</strong> Penalty={changepointsData.parameters.penalty}, Model={changepointsData.parameters.model}.
+              <br/><strong>Significance:</strong> Identifies regime shifts from policy, irrigation expansion, or hydrology changes.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // Lag Correlation Visualization
+    if (selectedAdvancedModule === 'LAG_CORRELATION' && lagCorrelationData) {
+      return (
+        <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-pink-400">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">⏱️</span>
+              <h3 className="text-lg font-bold text-gray-800">Rainfall-GWL Lag Correlation</h3>
+            </div>
+            <span className="text-sm bg-pink-100 text-pink-800 px-3 py-1 rounded-full font-semibold">
+              {lagCorrelationData.count} sites analyzed
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+            <div className="bg-pink-50 p-3 rounded-lg border border-pink-200">
+              <div className="text-xs text-gray-600 mb-1">Mean Lag</div>
+              <div className="text-2xl font-bold text-pink-600">{lagCorrelationData.statistics.mean_lag.toFixed(1)} months</div>
+            </div>
+            <div className="bg-purple-50 p-3 rounded-lg border border-purple-200">
+              <div className="text-xs text-gray-600 mb-1">Median Lag</div>
+              <div className="text-2xl font-bold text-purple-600">{lagCorrelationData.statistics.median_lag.toFixed(1)} months</div>
+            </div>
+            <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+              <div className="text-xs text-gray-600 mb-1">Avg |Correlation|</div>
+              <div className="text-2xl font-bold text-blue-600">{lagCorrelationData.statistics.mean_abs_correlation.toFixed(3)}</div>
+            </div>
+            <div className="bg-green-50 p-3 rounded-lg border border-green-200">
+              <div className="text-xs text-gray-600 mb-1">Max Lag Tested</div>
+              <div className="text-2xl font-bold text-green-600">{lagCorrelationData.parameters.max_lag_months} months</div>
+            </div>
+          </div>
+
+          <div className="h-[500px] relative rounded-lg overflow-hidden">
+            <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`lag-${mapKey}`}>
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#EC4899", weight: 3, fillOpacity: 0.1 }} />}
+              
+              {lagCorrelationData.data.map((point, i) => {
+                const lagColors: Record<number, string> = {
+                  0: '#DC2626', 1: '#F59E0B', 2: '#FCD34D', 
+                  3: '#84CC16', 4: '#22C55E', 5: '#14B8A6',
+                  6: '#3B82F6', 7: '#6366F1', 8: '#8B5CF6',
+                  9: '#A855F7', 10: '#D946EF', 11: '#EC4899', 12: '#F43F5E'
+                };
+                const color = lagColors[point.best_lag_months] || '#9CA3AF';
+                
+                return (
+                  <CircleMarker
+                    key={`lag_${i}`}
+                    center={[point.latitude, point.longitude]}
+                    radius={6 + (point.abs_correlation * 4)}
+                    fillColor={color}
+                    color="white"
+                    weight={2}
+                    fillOpacity={0.8}
+                  >
+                    <Popup>
+                      <div style={{ fontFamily: 'sans-serif', minWidth: '200px' }}>
+                        <strong style={{ color }}>Best Lag: {point.best_lag_months} months</strong><br/>
+                        <hr style={{ margin: '5px 0' }}/>
+                        <table style={{ width: '100%', fontSize: '12px' }}>
+                          <tbody>
+                            <tr><td><strong>Site ID:</strong></td><td>{point.site_id}</td></tr>
+                            <tr><td><strong>Correlation:</strong></td><td>{point.correlation.toFixed(3)}</td></tr>
+                            <tr><td><strong>|Correlation|:</strong></td><td>{point.abs_correlation.toFixed(3)}</td></tr>
+                            <tr><td><strong>Relationship:</strong></td><td>{point.relationship}</td></tr>
+                            <tr><td><strong>Data Points:</strong></td><td>{point.n_months_analyzed} months</td></tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                );
+              })}
+            </MapContainer>
+
+            <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-pink-300 max-h-[300px] overflow-y-auto">
+              <div className="text-xs font-bold mb-2">Lag (months)</div>
+              <div className="space-y-1">
+                {Object.entries(lagCorrelationData.statistics.lag_distribution).sort(([a], [b]) => Number(a) - Number(b)).map(([lag, count]) => {
+                  const lagColors: Record<number, string> = {
+                    0: '#DC2626', 1: '#F59E0B', 2: '#FCD34D', 
+                    3: '#84CC16', 4: '#22C55E', 5: '#14B8A6',
+                    6: '#3B82F6', 7: '#6366F1', 8: '#8B5CF6',
+                    9: '#A855F7', 10: '#D946EF', 11: '#EC4899', 12: '#F43F5E'
+                  };
+                  return (
+                    <div key={lag} className="flex items-center gap-2">
+                      <div className="w-4 h-4 rounded" style={{ backgroundColor: lagColors[Number(lag)] || '#9CA3AF' }}></div>
+                      <span className="text-xs">{lag} mo ({count} sites)</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <p className="text-sm text-blue-800">
+              <strong>ℹ️ What:</strong> Time lag between AOI rainfall and site GWL for max correlation.
+              <br/><strong>How:</strong> Tests 0–{lagCorrelationData.parameters.max_lag_months} month lags via cross-correlation.
+              <br/><strong>Significance:</strong> Reveals aquifer memory; short lags = responsive systems, long lags = slow infiltration.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // Hotspots Clustering Visualization
+    if (selectedAdvancedModule === 'HOTSPOTS' && hotspotsData) {
+      return (
+        <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-rose-400">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">🔥</span>
+              <h3 className="text-lg font-bold text-gray-800">Declining GWL Hotspots (DBSCAN)</h3>
+            </div>
+            <span className="text-sm bg-rose-100 text-rose-800 px-3 py-1 rounded-full font-semibold">
+              {hotspotsData.statistics.n_clusters} clusters found
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+            <div className="bg-rose-50 p-3 rounded-lg border border-rose-200">
+              <div className="text-xs text-gray-600 mb-1">Declining Sites</div>
+              <div className="text-2xl font-bold text-rose-600">{hotspotsData.statistics.total_declining_sites}</div>
+            </div>
+            <div className="bg-orange-50 p-3 rounded-lg border border-orange-200">
+              <div className="text-xs text-gray-600 mb-1">Clustered</div>
+              <div className="text-2xl font-bold text-orange-600">{hotspotsData.statistics.clustered_points}</div>
+            </div>
+            <div className="bg-gray-50 p-3 rounded-lg border border-gray-200">
+              <div className="text-xs text-gray-600 mb-1">Noise Points</div>
+              <div className="text-2xl font-bold text-gray-600">{hotspotsData.statistics.noise_points}</div>
+            </div>
+            <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+              <div className="text-xs text-gray-600 mb-1">Clustering Rate</div>
+              <div className="text-2xl font-bold text-blue-600">{(hotspotsData.statistics.clustering_rate * 100).toFixed(1)}%</div>
+            </div>
+          </div>
+
+          {hotspotsData.clusters.length > 0 && (
+            <div className="bg-gradient-to-r from-rose-50 to-orange-50 p-4 rounded-lg border border-rose-200 mb-4">
+              <h4 className="font-bold text-sm mb-3 text-rose-900">Cluster Details</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[200px] overflow-y-auto">
+                {hotspotsData.clusters.map((cluster, idx) => (
+                  <div key={idx} className="bg-white p-3 rounded-lg border border-gray-200">
+                    <div className="font-semibold text-sm flex items-center gap-2">
+                      <div className="w-4 h-4 rounded-full" style={{ backgroundColor: getHotspotColor(cluster.cluster_id) }}></div>
+                      Cluster {cluster.cluster_id}
+                    </div>
+                    <div className="text-xs text-gray-600 mt-1">
+                      <div><strong>Sites:</strong> {cluster.n_sites}</div>
+                      <div><strong>Mean Slope:</strong> {cluster.mean_slope.toFixed(4)} m/yr</div>
+                      <div><strong>Max Slope:</strong> {cluster.max_slope.toFixed(4)} m/yr</div>
+                      <div><strong>Centroid:</strong> {cluster.centroid_lat.toFixed(4)}, {cluster.centroid_lon.toFixed(4)}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="h-[500px] relative rounded-lg overflow-hidden">
+            <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`hotspots-${mapKey}`}>
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#F43F5E", weight: 3, fillOpacity: 0.1 }} />}
+              
+              {hotspotsData.data.map((point, i) => (
+                <CircleMarker
+                  key={`hot_${i}`}
+                  center={[point.latitude, point.longitude]}
+                  radius={7}
+                  fillColor={getHotspotColor(point.cluster)}
+                  color="white"
+                  weight={2}
+                  fillOpacity={point.cluster === -1 ? 0.3 : 0.8}
+                >
+                  <Popup>
+                    <div style={{ fontFamily: 'sans-serif', minWidth: '180px' }}>
+                      <strong style={{ color: getHotspotColor(point.cluster) }}>
+                        {point.cluster === -1 ? 'Noise Point' : `Cluster ${point.cluster}`}
+                      </strong><br/>
+                      <hr style={{ margin: '5px 0' }}/>
+                      <table style={{ width: '100%', fontSize: '12px' }}>
+                        <tbody>
+                          <tr><td><strong>Site ID:</strong></td><td>{point.site_id}</td></tr>
+                          <tr><td><strong>Decline Rate:</strong></td><td>{point.slope_m_per_year.toFixed(4)} m/yr</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </Popup>
+                </CircleMarker>
+              ))}
+
+              {hotspotsData.clusters.map((cluster, idx) => (
+                <CircleMarker
+                  key={`centroid_${idx}`}
+                  center={[cluster.centroid_lat, cluster.centroid_lon]}
+                  radius={12}
+                  fillColor={getHotspotColor(cluster.cluster_id)}
+                  color="white"
+                  weight={3}
+                  fillOpacity={1}
+                >
+                  <Popup>
+                    <div style={{ fontFamily: 'sans-serif', minWidth: '180px' }}>
+                      <strong>Cluster {cluster.cluster_id} Centroid</strong><br/>
+                      <hr style={{ margin: '5px 0' }}/>
+                      <div style={{ fontSize: '12px' }}>
+                        <div><strong>Sites:</strong> {cluster.n_sites}</div>
+                        <div><strong>Mean Decline:</strong> {cluster.mean_slope.toFixed(4)} m/yr</div>
+                      </div>
+                    </div>
+                  </Popup>
+                </CircleMarker>
+              ))}
+            </MapContainer>
+
+            <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-rose-300">
+              <div className="text-xs font-bold mb-2">Clusters</div>
+              <div className="space-y-1 max-h-[200px] overflow-y-auto">
+                {hotspotsData.clusters.slice(0, 8).map((cluster, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded-full" style={{ backgroundColor: getHotspotColor(cluster.cluster_id) }}></div>
+                    <span className="text-xs">Cluster {cluster.cluster_id} ({cluster.n_sites})</span>
+                  </div>
+                ))}
+                <div className="flex items-center gap-2">
+                  <div className="w-4 h-4 rounded-full bg-gray-400"></div>
+                  <span className="text-xs">Noise ({hotspotsData.statistics.noise_points})</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <p className="text-sm text-blue-800">
+              <strong>ℹ️ What:</strong> Spatial clusters of declining sites using DBSCAN (haversine metric).
+              <br/><strong>How:</strong> eps={hotspotsData.parameters.eps_km} km, min_samples={hotspotsData.parameters.min_samples}.
+              <br/><strong>Significance:</strong> Priority zones for regional intervention; large centroids = critical hotspots.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // GRACE Divergence Visualization
+    if (selectedAdvancedModule === 'GRACE_DIVERGENCE' && divergenceData) {
+      return (
+        <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-amber-400">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">🌐</span>
+              <h3 className="text-lg font-bold text-gray-800">GRACE-Well Divergence Analysis</h3>
+            </div>
+            <span className="text-sm bg-amber-100 text-amber-800 px-3 py-1 rounded-full font-semibold">
+              {divergenceData.count} pixels analyzed
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+            <div className="bg-amber-50 p-3 rounded-lg border border-amber-200">
+              <div className="text-xs text-gray-600 mb-1">Mean Divergence</div>
+              <div className="text-2xl font-bold text-amber-600">{divergenceData.statistics.mean_divergence.toFixed(3)}</div>
+            </div>
+            <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+              <div className="text-xs text-gray-600 mb-1">Positive Div</div>
+              <div className="text-2xl font-bold text-blue-600">{divergenceData.statistics.positive_divergence_pixels}</div>
+            </div>
+            <div className="bg-red-50 p-3 rounded-lg border border-red-200">
+              <div className="text-xs text-gray-600 mb-1">Negative Div</div>
+              <div className="text-2xl font-bold text-red-600">{divergenceData.statistics.negative_divergence_pixels}</div>
+            </div>
+            <div className="bg-purple-50 p-3 rounded-lg border border-purple-200">
+              <div className="text-xs text-gray-600 mb-1">Max |Divergence|</div>
+              <div className="text-xl font-bold text-purple-600">{Math.max(Math.abs(divergenceData.statistics.max_divergence), Math.abs(divergenceData.statistics.min_divergence)).toFixed(3)}</div>
+            </div>
+          </div>
+
+          <div className="h-[500px] relative rounded-lg overflow-hidden">
+            <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`divergence-${mapKey}`}>
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#F59E0B", weight: 3, fillOpacity: 0.1 }} />}
+              
+              {divergenceData.data.map((point, i) => (
+                <CircleMarker
+                  key={`div_${i}`}
+                  center={[point.latitude, point.longitude]}
+                  radius={5}
+                  fillColor={getDivergenceColor(point.divergence)}
+                  color="white"
+                  weight={1}
+                  fillOpacity={0.8}
+                >
+                  <Popup>
+                    <div style={{ fontFamily: 'sans-serif', minWidth: '200px' }}>
+                      <strong style={{ color: getDivergenceColor(point.divergence) }}>Divergence: {point.divergence.toFixed(3)}</strong><br/>
+                      <hr style={{ margin: '5px 0' }}/>
+                      <table style={{ width: '100%', fontSize: '12px' }}>
+                        <tbody>
+                          <tr><td><strong>GRACE z:</strong></td><td>{point.grace_z.toFixed(3)}</td></tr>
+                          <tr><td><strong>Well z (interp):</strong></td><td>{point.well_z_interpolated.toFixed(3)}</td></tr>
+                          <tr><td><strong>TWS:</strong></td><td>{point.tws.toFixed(2)} cm</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </Popup>
+                </CircleMarker>
+              ))}
+            </MapContainer>
+
+            <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-amber-300">
+              <div className="text-xs font-bold mb-2">Divergence (z-score)</div>
+              <div className="space-y-1">
+                {[
+                  { label: 'Strong -ve (<-2)', value: -2.5 },
+                  { label: 'Moderate -ve (-2 to -1)', value: -1.5 },
+                  { label: 'Weak -ve (-1 to 0)', value: -0.5 },
+                  { label: 'Weak +ve (0 to 1)', value: 0.5 },
+                  { label: 'Moderate +ve (1 to 2)', value: 1.5 },
+                  { label: 'Strong +ve (>2)', value: 2.5 }
+                ].map((item, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded" style={{ backgroundColor: getDivergenceColor(item.value) }}></div>
+                    <span className="text-xs">{item.label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <p className="text-sm text-blue-800">
+              <strong>ℹ️ What:</strong> z_GRACE − z_GWL (interpolated) at each pixel.
+              <br/><strong>How:</strong> Standardize GRACE and well data separately; compute pixel-level divergence.
+              <br/><strong>Significance:</strong> Negative divergence = GRACE underestimates stress (surface/pumped zone mismatch). Positive = overestimates.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    return null;
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-green-50">
+      {alertMessage && (
+        <div className={`fixed top-4 right-4 z-[10000] max-w-md p-4 rounded-lg shadow-2xl border-2 animate-fade-in ${
+          alertType === 'error' ? 'bg-red-50 border-red-300 text-red-800' :
+          alertType === 'warning' ? 'bg-yellow-50 border-yellow-300 text-yellow-800' :
+          alertType === 'success' ? 'bg-green-50 border-green-300 text-green-800' :
+          'bg-blue-50 border-blue-300 text-blue-800'
+        }`}>
+          <div className="flex items-center gap-2">
+            <span className="text-2xl">
+              {alertType === 'error' ? '❌' : alertType === 'warning' ? '⚠️' : alertType === 'success' ? '✅' : 'ℹ️'}
+            </span>
+            <span className="font-medium">{alertMessage}</span>
+          </div>
+        </div>
+      )}
+
+      <div className="relative bg-gradient-to-r from-blue-600 via-green-600 to-teal-600 text-white shadow-2xl">
+        <div className="absolute inset-0 bg-black/10"></div>
+        <div className="relative max-w-7xl mx-auto px-6 py-8">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-4xl font-bold mb-2 flex items-center gap-3">
+                🌍 GeoHydro Dashboard
+              </h1>
+              <p className="text-blue-100 text-lg">
+                Advanced Groundwater Analysis & Remote Sensing Platform
+              </p>
+            </div>
+            <button
+              onClick={() => setIsChatOpen(!isChatOpen)}
+              className="bg-white/20 backdrop-blur-md hover:bg-white/30 text-white px-6 py-3 rounded-xl font-semibold transition-all duration-200 flex items-center gap-2 shadow-lg border border-white/30"
+            >
+              <span className="text-2xl">💬</span>
+              {isChatOpen ? 'Close Chat' : 'Ask AI Expert'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-7xl mx-auto px-6 py-8">
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8">
+          <div className="lg:col-span-4 bg-white rounded-xl shadow-xl p-6 border-2 border-blue-200">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+              <span>🎛️</span> Control Panel
+            </h3>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">State</label>
+                <select
+                  className="w-full p-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+                  value={selectedState}
+                  onChange={(e) => {
+                    setSelectedState(e.target.value);
+                    setSelectedDistrict("");
+                  }}
+                >
+                  <option value="">All India</option>
+                  {states.map((s, i) => (
+                    <option key={i} value={s.State}>{s.State}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">District</label>
+                <select
+                  className="w-full p-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+                  value={selectedDistrict}
+                  onChange={(e) => setSelectedDistrict(e.target.value)}
+                  disabled={!selectedState}
+                >
+                  <option value="">All Districts</option>
+                  {districts.map((d, i) => (
+                    <option key={i} value={d.district_name}>{d.district_name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Year</label>
+                <select
+                  className="w-full p-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+                  value={selectedYear}
+                  onChange={(e) => setSelectedYear(Number(e.target.value))}
+                >
+                  {availableYears.map(y => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Month (Optional)</label>
+                <select
+                  className="w-full p-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+                  value={selectedMonth || ""}
+                  onChange={(e) => setSelectedMonth(e.target.value ? Number(e.target.value) : null)}
+                >
+                  <option value="">All Year</option>
+                  {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                    <option key={m} value={m}>{new Date(2000, m - 1).toLocaleString('default', { month: 'long' })}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
               <button
                 onClick={() => setShowAquifers(!showAquifers)}
-                disabled={!selectedState}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed
-                  ${showAquifers 
-                    ? 'bg-purple-600 text-white shadow-md' 
-                    : 'bg-white border-2 border-purple-300 text-purple-600 hover:bg-purple-50'}`}
+                className={`p-3 rounded-lg font-semibold transition-all duration-200 border-2 ${
+                  showAquifers
+                    ? 'bg-purple-500 text-white border-purple-600 shadow-lg'
+                    : 'bg-white text-gray-700 border-gray-300 hover:border-purple-400'
+                }`}
               >
                 🔷 Aquifers
               </button>
 
               <button
-                onClick={() => setShowWells(!showWells)}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                  ${showWells 
-                    ? 'bg-red-600 text-white shadow-md' 
-                    : 'bg-white border-2 border-red-300 text-red-600 hover:bg-red-50'}`}
-              >
-                💧 Wells
-              </button>
-
-              <button
                 onClick={() => setShowGrace(!showGrace)}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                  ${showGrace 
-                    ? 'bg-green-600 text-white shadow-md' 
-                    : 'bg-white border-2 border-green-300 text-green-600 hover:bg-green-50'}`}
+                className={`p-3 rounded-lg font-semibold transition-all duration-200 border-2 ${
+                  showGrace
+                    ? 'bg-green-500 text-white border-green-600 shadow-lg'
+                    : 'bg-white text-gray-700 border-gray-300 hover:border-green-400'
+                }`}
               >
                 🌊 GRACE
               </button>
 
               <button
                 onClick={() => setShowRainfall(!showRainfall)}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                  ${showRainfall 
-                    ? 'bg-blue-600 text-white shadow-md' 
-                    : 'bg-white border-2 border-blue-300 text-blue-600 hover:bg-blue-50'}`}
+                className={`p-3 rounded-lg font-semibold transition-all duration-200 border-2 ${
+                  showRainfall
+                    ? 'bg-blue-500 text-white border-blue-600 shadow-lg'
+                    : 'bg-white text-gray-700 border-gray-300 hover:border-blue-400'
+                }`}
               >
                 🌧️ Rainfall
               </button>
+
+              <button
+                onClick={() => setShowWells(!showWells)}
+                className={`p-3 rounded-lg font-semibold transition-all duration-200 border-2 ${
+                  showWells
+                    ? 'bg-red-500 text-white border-red-600 shadow-lg'
+                    : 'bg-white text-gray-700 border-gray-300 hover:border-red-400'
+                }`}
+              >
+                💧 Wells
+              </button>
+
+              <button
+                onClick={() => setShowTimeseries(!showTimeseries)}
+                className={`p-3 rounded-lg font-semibold transition-all duration-200 border-2 ${
+                  showTimeseries
+                    ? 'bg-indigo-500 text-white border-indigo-600 shadow-lg'
+                    : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-400'
+                }`}
+              >
+                📈 Timeseries
+              </button>
+
+              {/* NEW: Advanced Modules Button */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowAdvancedMenu(!showAdvancedMenu)}
+                  className={`w-full p-3 rounded-lg font-semibold transition-all duration-200 border-2 ${
+                    selectedAdvancedModule
+                      ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white border-purple-600 shadow-lg'
+                      : 'bg-white text-gray-700 border-gray-300 hover:border-purple-400'
+                  }`}
+                >
+                  🔬 Advanced
+                </button>
+
+                {showAdvancedMenu && (
+                  <div className="absolute top-full left-0 mt-2 w-80 bg-white rounded-lg shadow-2xl border-2 border-purple-300 z-[2000] max-h-96 overflow-y-auto">
+                    <div className="p-2">
+                      {[
+                        { id: 'ASI', label: '1. Aquifer Suitability Index', icon: '🔷' },
+                        { id: 'NETWORK_DENSITY', label: '2. Network Density', icon: '📊' },
+                        { id: 'SASS', label: '3. Aquifer Stress Score', icon: '⚠️' },
+                        { id: 'GRACE_DIVERGENCE', label: '4. GRACE Divergence', icon: '🌐' },
+                        { id: 'FORECAST', label: '5. GWL Forecasting', icon: '📈' },
+                        { id: 'RECHARGE', label: '6. Recharge Planning', icon: '💧' },
+                        { id: 'SIGNIFICANT_TRENDS', label: '7. Significant Trends', icon: '📉' },
+                        { id: 'CHANGEPOINTS', label: '8. Changepoint Detection', icon: '📍' },
+                        { id: 'LAG_CORRELATION', label: '9. Lag Correlation', icon: '⏱️' },
+                        { id: 'HOTSPOTS', label: '10. Hotspots Clustering', icon: '🔥' }
+                      ].map((module) => (
+                        <button
+                          key={module.id}
+                          onClick={() => {
+                            setSelectedAdvancedModule(module.id);
+                            setShowAdvancedMenu(false);
+                            // Clear other visualizations
+                            setShowAquifers(false);
+                            setShowGrace(false);
+                            setShowRainfall(false);
+                            setShowWells(false);
+                            setShowTimeseries(false);
+                          }}
+                          className={`w-full text-left p-3 rounded-lg hover:bg-purple-50 transition-all flex items-center gap-2 ${
+                            selectedAdvancedModule === module.id ? 'bg-purple-100 font-semibold' : ''
+                          }`}
+                        >
+                          <span className="text-xl">{module.icon}</span>
+                          <span className="text-sm">{module.label}</span>
+                        </button>
+                      ))}
+                      
+                      {selectedAdvancedModule && (
+                        <button
+                          onClick={() => {
+                            setSelectedAdvancedModule('');
+                            setShowAdvancedMenu(false);
+                          }}
+                          className="w-full mt-2 p-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-all text-sm font-semibold"
+                        >
+                          ❌ Clear Advanced Module
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-
-          <div className="flex gap-2 mt-3 pt-3 border-t-2 border-gray-200">
-            <button
-              onClick={() => setShowTimeseries(!showTimeseries)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                ${showTimeseries 
-                  ? 'bg-indigo-600 text-white shadow-md' 
-                  : 'bg-white border-2 border-indigo-300 text-indigo-600 hover:bg-indigo-50'}`}
-            >
-              📈 Timeseries
-            </button>
-
-            <button
-              onClick={() => setShowSummary(!showSummary)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                ${showSummary 
-                  ? 'bg-orange-600 text-white shadow-md' 
-                  : 'bg-white border-2 border-orange-300 text-orange-600 hover:bg-orange-50'}`}
-            >
-              📊 Summary
-            </button>
-
-            <button
-              onClick={() => setShowStorage(!showStorage)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                ${showStorage 
-                  ? 'bg-teal-600 text-white shadow-md' 
-                  : 'bg-white border-2 border-teal-300 text-teal-600 hover:bg-teal-50'}`}
-            >
-              💾 Storage
-            </button>
-
-            {/* ============= View Selector Dropdown ============= */}
-            {showTimeseries && (
-              <select
-                value={timeseriesView}
-                onChange={(e) => setTimeseriesView(e.target.value as "raw" | "seasonal" | "deseasonalized")}
-                className="border-2 border-indigo-300 px-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent bg-white"
-              >
-                <option value="raw">📊 Raw Data</option>
-                <option value="seasonal">🔄 Seasonal Pattern</option>
-                <option value="deseasonalized">📈 Deseasonalized Trend</option>
-              </select>
-            )}
-          </div>
         </div>
-      </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 p-6 overflow-y-auto">
-        {/* Maps Grid */}
         {activeLayers.length > 0 && (
-          <div className={`grid gap-6 mb-6 ${activeLayers.length === 1 ? 'grid-cols-1' : activeLayers.length === 2 ? 'grid-cols-2' : activeLayers.length === 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
+          <div className="mb-6 bg-white rounded-xl shadow-xl p-4 border-2 border-gray-200">
+            <h4 className="text-sm font-bold text-gray-700 mb-2">Active Layers:</h4>
+            <div className="flex flex-wrap gap-2">
+              {activeLayers.map((layer, idx) => (
+                <div key={idx} className="flex items-center gap-2 bg-gray-100 px-3 py-1 rounded-full border border-gray-300">
+                  <span>{layer.icon}</span>
+                  <span className="text-sm font-medium">{layer.name}</span>
+                  <div className="w-3 h-3 rounded-full" style={{ backgroundColor: layer.color === 'purple' ? '#9333EA' : layer.color === 'green' ? '#059669' : layer.color === 'blue' ? '#2563EB' : '#DC2626' }}></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* NEW: Render Advanced Module Content */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6 mb-8">
+          {renderAdvancedModuleContent()}
+        </div>
+
+        {/* Existing Map Grid */}
+        {(showAquifers || showGrace || showRainfall || showWells) && !selectedAdvancedModule && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
             {activeLayers.map((layer) => (
               <div key={layer.id} className="h-[600px]">
-                {renderMap(layer.id, layer.name, layer.icon, layer.color)}
+                {renderMap(layer.id, layer.name, layer.icon, 
+                  layer.color === 'purple' ? '#9333EA' : 
+                  layer.color === 'green' ? '#059669' : 
+                  layer.color === 'blue' ? '#2563EB' : '#DC2626'
+                )}
               </div>
             ))}
           </div>
         )}
 
-        {/* Analytics Panels Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-          {/* ============= TIMESERIES CHART SECTION (WITH RAINFALL) ============= */}
-          {showTimeseries && (
-            <div className="bg-white rounded-xl shadow-2xl p-4 overflow-y-auto border-2 border-indigo-400">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                  <span className="text-2xl">📈</span>
-                  <h3 className="text-lg font-bold text-gray-800">
-                    Timeseries Analysis
-                    {timeseriesResponse && (
-                      <span className="text-sm font-normal text-gray-500 ml-2">
-                        ({timeseriesResponse.view} view)
-                      </span>
-                    )}
-                  </h3>
-                </div>
-              </div>
-              
-              {!timeseriesResponse ? (
-                <p className="text-gray-500 text-center py-8">No timeseries data available</p>
-              ) : timeseriesResponse.error ? (
-                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-sm text-yellow-800">
-                  {timeseriesResponse.error}
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {/* ============= DUAL-AXIS PLOTLY CHART ============= */}
-                  <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
-                    <Plot
-                      data={[
-                        // ✅ GWL Trace (Y1 - Left axis, REVERSED for raw view)
-                        {
-                          x: timeseriesResponse.timeseries.map(p => p.date),
-                          y: timeseriesResponse.timeseries.map(p => p.value || p.avg_gwl),
-                          type: 'scatter',
-                          mode: 'lines+markers',
-                          name: timeseriesResponse.view === 'raw' ? 'GWL' : 
-                                timeseriesResponse.view === 'seasonal' ? 'Seasonal Pattern' : 
-                                'Deseasonalized',
-                          line: { color: GWL_COLOR, width: 3 },
-                          marker: { size: 5 },
-                          yaxis: 'y'
-                        },
-                        // ✅ Trendline (only for raw and deseasonalized)
-                        ...(timeseriesResponse.statistics?.trendline && 
-                            (timeseriesResponse.view === 'raw' || timeseriesResponse.view === 'deseasonalized') ? [{
-                          x: timeseriesResponse.statistics.trendline.map(t => t.date),
-                          y: timeseriesResponse.statistics.trendline.map(t => t.trendline_value),
-                          type: 'scatter' as const,
-                          mode: 'lines' as const,
-                          name: `Trend (R²=${timeseriesResponse.statistics.r_squared.toFixed(3)})`,
-                          line: { 
-                            color: timeseriesResponse.statistics.trend_direction === 'declining' 
-                              ? TREND_DECLINE_COLOR 
-                              : TREND_RECOVER_COLOR,
-                            width: 2,
-                            dash: 'dash' 
-                          },
-                          yaxis: 'y'
-                        }] : []),
-                        // ✅ RAINFALL Trace (Y2 - Right axis, BAR for raw, LINE for others)
-                        ...(timeseriesResponse.chart_config?.rainfall_field && timeseriesResponse.timeseries.some(p => 
-                          (p as any)[timeseriesResponse.chart_config!.rainfall_field] !== undefined
-                        ) ? [{
-                          x: timeseriesResponse.timeseries.map(p => p.date),
-                          y: timeseriesResponse.timeseries.map(p => 
-                            (p as any)[timeseriesResponse.chart_config!.rainfall_field] || 0
-                          ),
-                          type: timeseriesResponse.chart_config.rainfall_chart_type === 'bar' ? 'bar' as const : 'scatter' as const,
-                          mode: timeseriesResponse.chart_config.rainfall_chart_type === 'line' ? 'lines' as const : undefined,
-                          name: `Rainfall (${timeseriesResponse.chart_config.rainfall_unit})`,
-                          marker: { color: RAIN_COLOR, opacity: 0.6 },
-                          line: timeseriesResponse.chart_config.rainfall_chart_type === 'line' ? 
-                            { color: RAIN_COLOR, width: 2 } : undefined,
-                          yaxis: 'y2'
-                        }] : [])
-                      ]}
-                      layout={{
-                        autosize: true,
-                        height: 450,
-                        margin: { l: 60, r: 60, t: 40, b: 60 },
-                        xaxis: { 
-                          title: 'Date',
-                          gridcolor: 'rgba(0,0,0,0.1)',
-                          showgrid: true,
-                          domain: [0, 1]
-                        },
-                        // Y1 - GWL axis (LEFT, reversed for raw view)
-                        yaxis: { 
-                          title: timeseriesResponse.view === 'raw' ? 'GWL (m bgl)' : 
-                                 timeseriesResponse.view === 'seasonal' ? 'Seasonal Component (m)' :
-                                 'Deseasonalized GWL (m)',
-                          gridcolor: 'rgba(0,0,0,0.1)',
-                          showgrid: true,
-                          autorange: (timeseriesResponse.chart_config?.gwl_y_axis_reversed && 
-                                     timeseriesResponse.view === 'raw') ? 'reversed' : true,
-                          side: 'left',
-                          titlefont: { color: GWL_COLOR },
-                          tickfont: { color: GWL_COLOR }
-                        },
-                        // Y2 - Rainfall axis (RIGHT)
-                        ...(timeseriesResponse.chart_config?.rainfall_field ? {
-                          yaxis2: {
-                            title: `Rainfall (${timeseriesResponse.chart_config.rainfall_unit})`,
-                            overlaying: 'y',
-                            side: 'right',
-                            showgrid: false,
-                            titlefont: { color: RAIN_COLOR },
-                            tickfont: { color: RAIN_COLOR },
-                            rangemode: 'tozero'
-                          }
-                        } : {}),
-                        legend: {
-                          orientation: 'h',
-                          x: 0,
-                          y: -0.2,
-                          xanchor: 'left',
-                          yanchor: 'top',
-                          bgcolor: 'rgba(255,255,255,0.9)',
-                          bordercolor: 'rgba(0,0,0,0.1)',
-                          borderwidth: 1
-                        },
-                        hovermode: 'x unified',
-                        plot_bgcolor: 'white',
-                        paper_bgcolor: 'white',
-                        font: { family: 'Arial, sans-serif', size: 12 }
-                      }}
-                      config={{
-                        displayModeBar: true,
-                        displaylogo: false,
-                        modeBarButtonsToRemove: ['pan2d', 'select2d', 'lasso2d', 'resetScale2d', 'toggleSpikelines'],
-                        toImageButtonOptions: {
-                          format: 'png',
-                          filename: `timeseries_${timeseriesResponse.view}_${new Date().toISOString().split('T')[0]}`,
-                          height: 800,
-                          width: 1200,
-                          scale: 2
-                        }
-                      }}
-                      style={{ width: '100%' }}
-                      useResizeHandler={true}
-                    />
-                  </div>
-
-                  {/* Statistics Card */}
-                  {timeseriesResponse.statistics && (
-                    <div className={`p-3 rounded-lg border ${
-                      timeseriesResponse.statistics.trend_direction === 'declining' 
-                        ? 'bg-red-50 border-red-200' 
-                        : 'bg-green-50 border-green-200'
-                    }`}>
-                      <h4 className="font-bold text-sm mb-2">
-                        {timeseriesResponse.view === 'raw' && '📊 Raw Data Statistics'}
-                        {timeseriesResponse.view === 'seasonal' && '🔄 Seasonal Component'}
-                        {timeseriesResponse.view === 'deseasonalized' && '📈 Trend Analysis'}
-                      </h4>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        {timeseriesResponse.view === 'raw' && timeseriesResponse.statistics.mean_gwl && (
-                          <>
-                            <div><strong>Mean GWL:</strong> {timeseriesResponse.statistics.mean_gwl.toFixed(2)} m</div>
-                            <div><strong>Min/Max:</strong> {timeseriesResponse.statistics.min_gwl?.toFixed(2)} / {timeseriesResponse.statistics.max_gwl?.toFixed(2)} m</div>
-                          </>
-                        )}
-                        
-                        {timeseriesResponse.view === 'seasonal' && (
-                          <>
-                            <div><strong>Amplitude:</strong> {timeseriesResponse.statistics.seasonal_amplitude?.toFixed(2)} m</div>
-                            <div><strong>Mean:</strong> {timeseriesResponse.statistics.seasonal_mean?.toFixed(2)} m</div>
-                          </>
-                        )}
-                        
-                        {(timeseriesResponse.view === 'raw' || timeseriesResponse.view === 'deseasonalized') && (
-                          <>
-                            <div><strong>Slope:</strong> {timeseriesResponse.statistics.trend_slope_m_per_year.toFixed(4)} m/yr</div>
-                            <div><strong>R²:</strong> {timeseriesResponse.statistics.r_squared.toFixed(3)}</div>
-                            <div><strong>P-value:</strong> {timeseriesResponse.statistics.p_value.toFixed(4)}</div>
-                            <div>
-                              <strong>Significance:</strong> 
-                              <span className={timeseriesResponse.statistics.significance === 'significant' ? 'text-green-600 font-semibold' : 'text-gray-500'}>
-                                {' '}{timeseriesResponse.statistics.significance === 'significant' ? '✓ Yes (p<0.05)' : '✗ No'}
-                              </span>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                      {timeseriesResponse.statistics.note && (
-                        <div className="mt-2 pt-2 border-t border-gray-300">
-                          <p className="text-xs text-gray-700 italic">
-                            <strong>Note:</strong> {timeseriesResponse.statistics.note}
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Expandable Data Table */}
-                  <details className="bg-gray-50 rounded-lg border border-gray-200">
-                    <summary className="px-3 py-2 cursor-pointer font-semibold text-sm text-gray-700 hover:bg-gray-100">
-                      📋 View Data Table ({timeseriesResponse.count} points)
-                    </summary>
-                    <div className="max-h-[300px] overflow-y-auto p-3">
-                      <table className="w-full text-sm">
-                        <thead className="bg-gray-100 sticky top-0">
-                          <tr>
-                            <th className="px-2 py-1 text-left">Date</th>
-                            <th className="px-2 py-1 text-right">
-                              {timeseriesResponse.view === 'raw' ? 'Avg GWL (m)' : 'Value (m)'}
-                            </th>
-                            {timeseriesResponse.view === 'raw' && (
-                              <>
-                                <th className="px-2 py-1 text-right">Count</th>
-                                {timeseriesResponse.chart_config?.rainfall_field && (
-                                  <th className="px-2 py-1 text-right">
-                                    Rainfall ({timeseriesResponse.chart_config.rainfall_unit})
-                                  </th>
-                                )}
-                              </>
-                            )}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {timeseriesResponse.timeseries.map((point, idx) => (
-                            <tr key={idx} className="border-b hover:bg-gray-50">
-                              <td className="px-2 py-1">{new Date(point.date).toLocaleDateString()}</td>
-                              <td className="px-2 py-1 text-right font-medium">
-                                {point.value?.toFixed(2) || point.avg_gwl?.toFixed(2) || 'N/A'}
-                              </td>
-                              {timeseriesResponse.view === 'raw' && (
-                                <>
-                                  {point.count && (
-                                    <td className="px-2 py-1 text-right text-gray-500">{point.count}</td>
-                                  )}
-                                  {timeseriesResponse.chart_config?.rainfall_field && (
-                                    <td className="px-2 py-1 text-right text-blue-600">
-                                      {((point as any)[timeseriesResponse.chart_config.rainfall_field])?.toFixed(2) || 'N/A'}
-                                    </td>
-                                  )}
-                                </>
-                              )}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </details>
-
-                  {/* Download Button */}
-                  <div className="flex justify-center">
-                    <button
-                      onClick={() => {
-                        const headers = [
-                          'Date', 
-                          timeseriesResponse.view === 'raw' ? 'Avg GWL (m)' : 'Value (m)', 
-                          ...(timeseriesResponse.view === 'raw' ? ['Count'] : []),
-                          ...(timeseriesResponse.chart_config?.rainfall_field ? 
-                            [`Rainfall (${timeseriesResponse.chart_config.rainfall_unit})`] : [])
-                        ];
-                        
-                        const csv = [
-                          headers.join(','),
-                          ...timeseriesResponse.timeseries.map(p => 
-                            [
-                              p.date,
-                              p.value?.toFixed(2) || p.avg_gwl?.toFixed(2),
-                              ...(timeseriesResponse.view === 'raw' && p.count ? [p.count] : []),
-                              ...(timeseriesResponse.chart_config?.rainfall_field ? 
-                                [((p as any)[timeseriesResponse.chart_config.rainfall_field])?.toFixed(2) || ''] : [])
-                            ].join(',')
-                          )
-                        ].join('\n');
-                        
-                        const blob = new Blob([csv], { type: 'text/csv' });
-                        const url = window.URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `timeseries_${timeseriesResponse.view}_${new Date().toISOString().split('T')[0]}.csv`;
-                        a.click();
-                      }}
-                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-all flex items-center gap-2"
-                    >
-                      <span>📥</span>
-                      Download CSV
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ============= SUMMARY SECTION (unchanged) ============= */}
-          {showSummary && (
-            <div className="bg-white rounded-xl shadow-2xl p-4 overflow-y-auto border-2 border-orange-400">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="text-2xl">📊</span>
-                <h3 className="text-lg font-bold text-gray-800">Regional Summary</h3>
-              </div>
-              
-              {!summaryData ? (
-                <p className="text-gray-500 text-center py-8">No summary data available</p>
-              ) : summaryData.error ? (
-                <p className="text-red-500 text-center py-8">{summaryData.error}</p>
-              ) : (
-                <div className="space-y-4">
-                  <div className="bg-blue-50 p-3 rounded-lg">
-                    <h4 className="font-bold text-sm mb-2 text-blue-900">Statistics</h4>
-                    <div className="grid grid-cols-2 gap-2 text-sm">
-                      <div><strong>Mean GWL:</strong> {summaryData.statistics.mean_gwl.toFixed(2)} m</div>
-                      <div><strong>Min GWL:</strong> {summaryData.statistics.min_gwl.toFixed(2)} m</div>
-                      <div><strong>Max GWL:</strong> {summaryData.statistics.max_gwl.toFixed(2)} m</div>
-                      <div><strong>Std Dev:</strong> {summaryData.statistics.std_gwl.toFixed(2)} m</div>
-                    </div>
-                  </div>
-
-                  <div className={`p-3 rounded-lg ${summaryData.trend.trend_direction === 'declining' ? 'bg-red-50' : 'bg-green-50'}`}>
-                    <h4 className={`font-bold text-sm mb-2 ${summaryData.trend.trend_direction === 'declining' ? 'text-red-900' : 'text-green-900'}`}>
-                      Trend Analysis
-                    </h4>
-                    <div className="space-y-1 text-sm">
-                      <div><strong>Slope:</strong> {summaryData.trend.slope_m_per_year.toFixed(4)} m/year</div>
-                      <div><strong>Direction:</strong> {summaryData.trend.trend_direction === 'declining' ? '📉 Declining' : '📈 Recovering'}</div>
-                      <div><strong>R²:</strong> {summaryData.trend.r_squared.toFixed(3)}</div>
-                      <div><strong>P-value:</strong> {summaryData.trend.p_value.toFixed(4)}</div>
-                      <div><strong>Significance:</strong> {summaryData.trend.significance === 'significant' ? '✓ Significant' : '✗ Not Significant'}</div>
-                    </div>
-                  </div>
-
-                  <div className="bg-gray-50 p-3 rounded-lg">
-                    <h4 className="font-bold text-sm mb-2 text-gray-900">Temporal Coverage</h4>
-                    <div className="space-y-1 text-sm">
-                      <div><strong>Period:</strong> {new Date(summaryData.temporal_coverage.start_date).toLocaleDateString()} to {new Date(summaryData.temporal_coverage.end_date).toLocaleDateString()}</div>
-                      <div><strong>Span:</strong> {summaryData.temporal_coverage.span_years} years</div>
-                      <div><strong>Months of Data:</strong> {summaryData.temporal_coverage.months_of_data}</div>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ============= STORAGE SECTION (unchanged) ============= */}
-          {showStorage && (
-            <div className="bg-white rounded-xl shadow-2xl p-4 overflow-y-auto border-2 border-teal-400">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="text-2xl">💾</span>
-                <h3 className="text-lg font-bold text-gray-800">Storage Analysis</h3>
-              </div>
-              
-              {!storageData ? (
-                <p className="text-gray-500 text-center py-8">No storage data available</p>
-              ) : storageData.error ? (
-                <p className="text-red-500 text-center py-8">{storageData.error}</p>
-              ) : (
-                <div className="space-y-4">
-                  <div className="bg-teal-50 p-3 rounded-lg">
-                    <h4 className="font-bold text-sm mb-2 text-teal-900">Aquifer Properties</h4>
-                    <div className="space-y-1 text-sm">
-                      <div><strong>Total Area:</strong> {storageData.aquifer_properties.total_area_km2.toFixed(2)} km²</div>
-                      <div><strong>Specific Yield:</strong> {storageData.aquifer_properties.area_weighted_specific_yield.toFixed(4)}</div>
-                    </div>
-                  </div>
-
-                  <div className="bg-blue-50 p-3 rounded-lg">
-                    <h4 className="font-bold text-sm mb-2 text-blue-900">Summary</h4>
-                    <div className="space-y-1 text-sm">
-                      <div><strong>Avg Annual Change:</strong> {storageData.summary.avg_annual_storage_change_mcm.toFixed(2)} MCM</div>
-                      <div><strong>Years Analyzed:</strong> {storageData.summary.years_analyzed}</div>
-                    </div>
-                  </div>
-
-                  <div className="bg-gray-50 p-3 rounded-lg">
-                    <h4 className="font-bold text-sm mb-2 text-gray-900">Yearly Storage</h4>
-                    <div className="max-h-[250px] overflow-y-auto">
-                      <table className="w-full text-xs">
-                        <thead className="bg-gray-200 sticky top-0">
-                          <tr>
-                            <th className="px-2 py-1">Year</th>
-                            <th className="px-2 py-1">Pre (m)</th>
-                            <th className="px-2 py-1">Post (m)</th>
-                            <th className="px-2 py-1">Δ (MCM)</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {storageData.yearly_storage.map((year, idx) => (
-                            <tr key={idx} className="border-b">
-                              <td className="px-2 py-1">{year.year}</td>
-                              <td className="px-2 py-1">{year.pre_monsoon_gwl.toFixed(2)}</td>
-                              <td className="px-2 py-1">{year.post_monsoon_gwl.toFixed(2)}</td>
-                              <td className={`px-2 py-1 font-bold ${year.storage_change_mcm > 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                {year.storage_change_mcm.toFixed(2)}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Chatbot (unchanged) */}
-      <div className="fixed right-6 bottom-6 z-[2000]">
-        {isChatOpen && (
-          <div className="mb-4 w-96 h-[600px] bg-white rounded-2xl shadow-2xl flex flex-col border-2 border-blue-200">
-            <div className="bg-gradient-to-r from-blue-600 to-blue-500 text-white px-6 py-4 rounded-t-2xl flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="bg-white/20 p-2 rounded-lg">
-                  <span className="text-2xl">🤖</span>
-                </div>
-                <div>
-                  <h3 className="font-bold text-lg">GeoHydro Assistant</h3>
-                  <p className="text-xs text-blue-100">
-                    {activeLayers.length > 0 
-                      ? `Analyzing: ${activeLayers.map(l => l.name).join(', ')}` 
-                      : 'Groundwater Expert'}
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setIsChatOpen(false)}
-                className="text-white hover:bg-white/20 rounded-lg p-2 transition-all"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
-              {chatMessages.length === 1 && (
-                <div className="mb-4">
-                  <p className="text-xs text-gray-500 mb-2 font-medium">Try asking:</p>
-                  <div className="space-y-2">
-                    {activeLayers.length > 0 ? (
-                      <>
-                        <button
-                          onClick={() => setChatInput("What patterns do you see in the current map?")}
-                          className="block w-full text-left text-xs bg-white border border-gray-200 rounded-lg px-3 py-2 hover:bg-blue-50 hover:border-blue-300 transition-all"
-                        >
-                          💡 What patterns do you see in the current map?
-                        </button>
-                        <button
-                          onClick={() => setChatInput("Analyze the displayed data")}
-                          className="block w-full text-left text-xs bg-white border border-gray-200 rounded-lg px-3 py-2 hover:bg-blue-50 hover:border-blue-300 transition-all"
-                        >
-                          💡 Analyze the displayed data
-                        </button>
-                        <button
-                          onClick={() => setChatInput("What does this tell us about groundwater?")}
-                          className="block w-full text-left text-xs bg-white border border-gray-200 rounded-lg px-3 py-2 hover:bg-blue-50 hover:border-blue-300 transition-all"
-                        >
-                          💡 What does this tell us about groundwater?
-                        </button>
-                      </>
-                    ) : (
-                      suggestedQuestions.map((question, idx) => (
-                        <button
-                          key={idx}
-                          onClick={() => setChatInput(question)}
-                          className="block w-full text-left text-xs bg-white border border-gray-200 rounded-lg px-3 py-2 hover:bg-blue-50 hover:border-blue-300 transition-all"
-                        >
-                          💡 {question}
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {chatMessages.map((message, idx) => (
-                <div
-                  key={idx}
-                  className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
-                >
-                  <div
-                    className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                      message.role === "user"
-                        ? "bg-blue-600 text-white"
-                        : "bg-white border border-gray-200 text-gray-800"
+        {showTimeseries && timeseriesResponse && !selectedAdvancedModule && (
+          <div className="bg-white rounded-xl shadow-2xl p-6 mb-8 border-2 border-indigo-400">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                <span>📈</span> Unified Timeseries Analysis
+              </h3>
+              <div className="flex gap-2">
+                {(['raw', 'seasonal', 'deseasonalized'] as const).map((view) => (
+                  <button
+                    key={view}
+                    onClick={() => setTimeseriesView(view)}
+                    className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all ${
+                      timeseriesView === view
+                        ? 'bg-indigo-500 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                     }`}
                   >
-                    <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-                    {message.role === "assistant" && message.sourcesUsed && message.sourcesUsed > 0 && (
-                      <div className="mt-2 pt-2 border-t border-gray-200 flex items-center gap-2 text-xs text-gray-500">
-                        <span className="bg-green-100 text-green-700 px-2 py-1 rounded">
-                          📚 {message.sourcesUsed} sources
-                        </span>
-                      </div>
-                    )}
-                    <p className="text-xs mt-1 opacity-60">
-                      {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </p>
-                  </div>
-                </div>
-              ))}
+                    {view.charAt(0).toUpperCase() + view.slice(1)}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-              {isChatLoading && (
-                <div className="flex justify-start">
-                  <div className="bg-white border border-gray-200 rounded-2xl px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <div className="animate-spin rounded-full h-4 w-4 border-2 border-blue-600 border-t-transparent"></div>
-                      <span className="text-sm text-gray-600">Analyzing map context...</span>
+            {timeseriesResponse.statistics && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                {timeseriesResponse.statistics.gwl_trend && (
+                  <div className={`p-4 rounded-lg border-2 ${
+                    timeseriesResponse.statistics.gwl_trend.direction === 'Declining' 
+                      ? 'bg-red-50 border-red-300' 
+                      : 'bg-green-50 border-green-300'
+                  }`}>
+                    <div className="text-sm font-semibold text-gray-700 mb-2">GWL Trend</div>
+                    <div className={`text-2xl font-bold ${
+                      timeseriesResponse.statistics.gwl_trend.direction === 'Declining' 
+                        ? 'text-red-600' 
+                        : 'text-green-600'
+                    }`}>
+                      {timeseriesResponse.statistics.gwl_trend.slope_per_year.toFixed(4)} m/yr
+                    </div>
+                    <div className="text-xs text-gray-600 mt-1">
+                      R² = {timeseriesResponse.statistics.gwl_trend.r_squared.toFixed(3)} | 
+                      p = {timeseriesResponse.statistics.gwl_trend.p_value.toFixed(4)}
                     </div>
                   </div>
-                </div>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-
-            <div className="p-4 border-t border-gray-200 bg-white rounded-b-2xl">
-              <div className="flex gap-2">
-                <textarea
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyPress={handleChatKeyPress}
-                  placeholder={
-                    activeLayers.length > 0 
-                      ? "Ask about the displayed data..." 
-                      : "Ask about groundwater, GRACE, rainfall..."
-                  }
-                  className="flex-1 border-2 border-gray-300 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-                  rows={2}
-                  disabled={isChatLoading}
-                />
-                <button
-                  onClick={handleSendMessage}
-                  disabled={isChatLoading || !chatInput.trim()}
-                  className="bg-blue-600 text-white px-4 rounded-lg hover:bg-blue-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
-                >
-                  <span className="text-xl">➤</span>
-                </button>
-              </div>
-              <p className="text-xs text-gray-400 mt-2 text-center">
-                {activeLayers.length > 0 && (
-                  <span className="text-blue-600 font-medium">Context-aware • </span>
                 )}
-                Powered by LLaMA 3.1 • Press Enter to send
-              </p>
-            </div>
+
+                {timeseriesResponse.statistics.grace_trend && (
+                  <div className="p-4 rounded-lg bg-green-50 border-2 border-green-300">
+                    <div className="text-sm font-semibold text-gray-700 mb-2">GRACE Trend</div>
+                    <div className="text-2xl font-bold text-green-600">
+                      {timeseriesResponse.statistics.grace_trend.slope_per_year.toFixed(4)} cm/yr
+                    </div>
+                    <div className="text-xs text-gray-600 mt-1">
+                      R² = {timeseriesResponse.statistics.grace_trend.r_squared.toFixed(3)}
+                    </div>
+                  </div>
+                )}
+
+                {timeseriesResponse.statistics.rainfall_trend && (
+                  <div className="p-4 rounded-lg bg-blue-50 border-2 border-blue-300">
+                    <div className="text-sm font-semibold text-gray-700 mb-2">Rainfall Trend</div>
+                    <div className="text-2xl font-bold text-blue-600">
+                      {timeseriesResponse.statistics.rainfall_trend.slope_per_year.toFixed(4)} mm/yr
+                    </div>
+                    <div className="text-xs text-gray-600 mt-1">
+                      R² = {timeseriesResponse.statistics.rainfall_trend.r_squared.toFixed(3)}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <Plot
+              data={[
+                timeseriesResponse.timeseries.some(p => p.avg_gwl !== undefined) && {
+                  x: timeseriesResponse.timeseries.filter(p => p.avg_gwl !== undefined).map(p => p.date),
+                  y: timeseriesResponse.timeseries.filter(p => p.avg_gwl !== undefined).map(p => 
+                    timeseriesView === 'raw' ? p.avg_gwl :
+                    timeseriesView === 'seasonal' ? p.gwl_seasonal :
+                    p.gwl_deseasonalized
+                  ),
+                  type: 'scatter',
+                  mode: 'lines+markers',
+                  name: 'GWL (m bgl)',
+                  line: { color: GWL_COLOR, width: 2 },
+                  marker: { size: 6 },
+                  yaxis: 'y1'
+                },
+                timeseriesResponse.timeseries.some(p => p.avg_tws !== undefined) && {
+                  x: timeseriesResponse.timeseries.filter(p => p.avg_tws !== undefined).map(p => p.date),
+                  y: timeseriesResponse.timeseries.filter(p => p.avg_tws !== undefined).map(p => 
+                    timeseriesView === 'raw' ? p.avg_tws :
+                    timeseriesView === 'seasonal' ? p.grace_seasonal :
+                    p.grace_deseasonalized
+                  ),
+                  type: 'scatter',
+                  mode: 'lines+markers',
+                  name: 'GRACE TWS (cm)',
+                  line: { color: GRACE_COLOR, width: 2 },
+                  marker: { size: 6 },
+                  yaxis: 'y2'
+                },
+                timeseriesResponse.timeseries.some(p => p.avg_rainfall !== undefined) && {
+                  x: timeseriesResponse.timeseries.filter(p => p.avg_rainfall !== undefined).map(p => p.date),
+                  y: timeseriesResponse.timeseries.filter(p => p.avg_rainfall !== undefined).map(p => 
+                    timeseriesView === 'raw' ? p.avg_rainfall :
+                    timeseriesView === 'seasonal' ? p.rainfall_seasonal :
+                    p.rainfall_deseasonalized
+                  ),
+                  type: 'bar',
+                  name: 'Rainfall (mm/day)',
+                  marker: { color: RAIN_COLOR, opacity: 0.6 },
+                  yaxis: 'y3'
+                }
+              ].filter(Boolean)}
+              layout={{
+                autosize: true,
+                height: 500,
+                margin: { l: 60, r: 60, t: 40, b: 60 },
+                xaxis: { 
+                  title: 'Date',
+                  gridcolor: 'rgba(0,0,0,0.1)'
+                },
+                yaxis: {
+                  title: 'GWL (m bgl)',
+                  titlefont: { color: GWL_COLOR },
+                  tickfont: { color: GWL_COLOR },
+                  autorange: 'reversed',
+                  gridcolor: 'rgba(0,0,0,0.1)'
+                },
+                yaxis2: {
+                  title: 'GRACE TWS (cm)',
+                  titlefont: { color: GRACE_COLOR },
+                  tickfont: { color: GRACE_COLOR },
+                  overlaying: 'y',
+                  side: 'right',
+                  showgrid: false
+                },
+                yaxis3: {
+                  title: 'Rainfall (mm/day)',
+                  titlefont: { color: RAIN_COLOR },
+                  tickfont: { color: RAIN_COLOR },
+                  overlaying: 'y',
+                  side: 'right',
+                  position: 0.85,
+                  showgrid: false
+                },
+                plot_bgcolor: 'white',
+                paper_bgcolor: 'white',
+                font: { family: 'Arial, sans-serif' },
+                hovermode: 'x unified',
+                legend: { x: 0.01, y: 0.99, bgcolor: 'rgba(255,255,255,0.8)' }
+              }}
+              config={{
+                displayModeBar: true,
+                displaylogo: false,
+                modeBarButtonsToRemove: ['pan2d', 'select2d', 'lasso2d'],
+                toImageButtonOptions: {
+                  format: 'png',
+                  filename: `timeseries_${timeseriesView}_${new Date().toISOString().split('T')[0]}`,
+                  height: 600,
+                  width: 1200,
+                  scale: 2
+                }
+              }}
+              style={{ width: '100%' }}
+              useResizeHandler={true}
+            />
           </div>
         )}
-
-        <button
-          onClick={() => setIsChatOpen(!isChatOpen)}
-          className={`bg-gradient-to-r from-blue-600 to-blue-500 text-white rounded-full w-16 h-16 flex items-center justify-center shadow-2xl hover:scale-110 transition-all duration-200 ${
-            isChatOpen ? "rotate-0" : "animate-bounce"
-          }`}
-        >
-          {isChatOpen ? (
-            <span className="text-2xl">✕</span>
-          ) : (
-            <span className="text-3xl">💬</span>
-          )}
-        </button>
       </div>
-    </main>
+
+      {isChatOpen && (
+        <div className="fixed bottom-6 right-6 w-96 h-[600px] bg-white rounded-2xl shadow-2xl border-2 border-blue-300 flex flex-col z-[10000]">
+          <div className="bg-gradient-to-r from-blue-600 to-green-600 text-white p-4 rounded-t-2xl flex items-center justify-between">
+            <div>
+              <h3 className="font-bold text-lg">AI Expert Assistant</h3>
+              <p className="text-xs text-blue-100">Powered by Llama3.1</p>
+            </div>
+            <button
+              onClick={() => setIsChatOpen(false)}
+              className="text-white hover:bg-white/20 rounded-lg p-2 transition-all"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            {chatMessages.map((msg, idx) => (
+              <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[80%] rounded-2xl p-3 ${
+                  msg.role === 'user'
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-gray-100 text-gray-800 border border-gray-200'
+                }`}>
+                  <div className="text-sm whitespace-pre-wrap">{msg.content}</div>
+                  {msg.sourcesUsed !== undefined && msg.sourcesUsed > 0 && (
+                    <div className="text-xs mt-2 opacity-70">
+                      📚 Used {msg.sourcesUsed} knowledge source{msg.sourcesUsed !== 1 ? 's' : ''}
+                    </div>
+                  )}
+                  <div className="text-xs mt-1 opacity-60">
+                    {msg.timestamp.toLocaleTimeString()}
+                  </div>
+                </div>
+              </div>
+            ))}
+            {isChatLoading && (
+              <div className="flex justify-start">
+                <div className="bg-gray-100 rounded-2xl p-3 border border-gray-200">
+                  <div className="flex gap-1">
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {chatMessages.length === 1 && (
+            <div className="px-4 py-2 border-t border-gray-200">
+              <div className="text-xs font-semibold text-gray-600 mb-2">Try asking:</div>
+              <div className="space-y-1">
+                {suggestedQuestions.map((q, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => setChatInput(q)}
+                    className="w-full text-left text-xs p-2 bg-blue-50 hover:bg-blue-100 rounded-lg transition-all text-blue-700"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="p-4 border-t border-gray-200">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyPress={handleChatKeyPress}
+                placeholder="Ask about groundwater, GRACE, or advanced modules..."
+                className="flex-1 p-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                disabled={isChatLoading}
+              />
+              <button
+                onClick={handleSendMessage}
+                disabled={!chatInput.trim() || isChatLoading}
+                className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg font-semibold transition-all"
+              >
+                {isChatLoading ? '⏳' : '📤'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isLoading && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[10000] flex items-center justify-center">
+          <div className="bg-white rounded-2xl p-8 shadow-2xl text-center">
+            <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-blue-600 mx-auto mb-4"></div>
+            <p className="text-lg font-semibold text-gray-700">Loading data...</p>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
