@@ -16,6 +16,30 @@ import numpy as np
 from scipy.stats import linregress
 import os
 from statsmodels.tsa.seasonal import seasonal_decompose
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import DBSCAN
+from scipy.interpolate import griddata
+from scipy.stats import linregress
+import statsmodels.api as sm
+import time 
+import geopandas as gpd
+from shapely.geometry import Point, shape
+from shapely.prepared import prep
+# Optional dependencies
+try:
+    import ruptures as rpt
+    RUPTURES_AVAILABLE = True
+except ImportError:
+    RUPTURES_AVAILABLE = False
+    print("⚠️  ruptures not available - changepoint detection disabled")
+
+try:
+    import pymannkendall as mk
+    MK_AVAILABLE = True
+except ImportError:
+    MK_AVAILABLE = False
+    print("⚠️  pymannkendall not available - Mann-Kendall test disabled")
 
 # ============= CHATBOT IMPORTS =============
 try:
@@ -32,13 +56,12 @@ except ImportError as e:
 
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 app = FastAPI(
     title="GeoHydro API - Wells, GRACE, Rainfall & AI Chatbot",
-    version="5.1.0",
-    description="Groundwater monitoring API with integrated AI chatbot and Dash-compatible seasonal decomposition"
+    version="6.1.0",
+    description="Groundwater monitoring API with integrated AI chatbot and unified timeseries (Wells + GRACE + Rainfall) - FIXED NaN Issues"
 )
 
 app.add_middleware(
@@ -67,13 +90,9 @@ chatbot_chain = None
 if CHATBOT_AVAILABLE:
     print("🤖 Initializing Chatbot...")
     try:
-        # Initialize embeddings
         embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        
-        # Initialize ChromaDB
         chroma_client = chromadb.PersistentClient(path="/dashboard/chroma_db")
         
-        # Initialize vector stores
         vector_store_analysis = Chroma(
             client=chroma_client,
             collection_name="analysis_collection",
@@ -85,16 +104,13 @@ if CHATBOT_AVAILABLE:
             embedding_function=embedding_function,
         )
         
-        # Initialize LLM with stop tokens
         llama_model = ChatOllama(
             model="llama3.1:8b",
             temperature=0.3,
             stop=["\n\nHuman:", "\n\nUser:", "```", "\n\n---", "\n0", "\n1"]
         )
         
-        # Helper function for chatbot
         def retrieve_context_fn(query: str):
-            """Retrieve information to help answer a query"""
             docs1 = vector_store_definitions.similarity_search(query, k=2)
             docs2 = vector_store_analysis.similarity_search(query, k=2)
             docs = docs1 + docs2
@@ -103,10 +119,8 @@ if CHATBOT_AVAILABLE:
                 for doc in docs
             )
 
-        # Create retrievable context runnable
         retrieve_context = RunnableLambda(lambda x: retrieve_context_fn(x["question"]))
 
-        # Define prompt template with variable length
         prompt = PromptTemplate(
             template="""
 You are a Groundwater and Satellite-based Remote Sensing domain expert specializing in Indian hydrogeology.
@@ -137,7 +151,6 @@ Instructions:
 Answer directly:
 """)
 
-        # Create the simplified chain - LLM handles classification
         chatbot_chain = RunnableMap({
             "question": lambda x: x["question"],
             "map_context": lambda x: str(x.get("map_context") or "No map data currently displayed"),
@@ -154,7 +167,6 @@ Answer directly:
 else:
     print("⚠️  Chatbot dependencies not installed. Chatbot disabled.")
 
-# ============= CHATBOT MODELS =============
 class ChatRequest(BaseModel):
     question: str
     map_context: Optional[dict] = None
@@ -170,7 +182,6 @@ class ChatResponse(BaseModel):
 GRACE_BAND_MAPPING = {}
 
 def auto_detect_grace_bands():
-    """Auto-detect GRACE bands"""
     global GRACE_BAND_MAPPING
     print("🔍 Auto-detecting GRACE band mappings...")
     try:
@@ -202,6 +213,38 @@ def grace_date_to_band(year: int, month: int) -> int:
     return GRACE_BAND_MAPPING[(year, month)]
 
 auto_detect_grace_bands()
+
+# =============================================================================
+# RAINFALL TABLE DETECTION
+# =============================================================================
+
+RAINFALL_TABLES = {}
+
+def detect_rainfall_tables():
+    global RAINFALL_TABLES
+    print("🔍 Detecting rainfall tables...")
+    try:
+        with engine.connect() as conn:
+            query = text("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name LIKE 'rf25_ind%_rfp25'
+                ORDER BY table_name;
+            """)
+            result = conn.execute(query)
+            for row in result:
+                table_name = row[0]
+                import re
+                match = re.search(r'rf25_ind(\d{4})_rfp25', table_name)
+                if match:
+                    year = int(match.group(1))
+                    RAINFALL_TABLES[year] = table_name
+            print(f"✅ Detected {len(RAINFALL_TABLES)} rainfall years: {sorted(RAINFALL_TABLES.keys())}")
+    except Exception as e:
+        print(f"⚠️  Error detecting rainfall tables: {e}")
+
+detect_rainfall_tables()
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -248,7 +291,6 @@ def get_boundary_geometry(state: str = None, district: str = None):
         return None
 
 def get_boundary_geojson(state: str = None, district: str = None):
-    """Get boundary as GeoJSON string for SQL queries"""
     if district and state:
         boundary_query = text("""
             SELECT ST_AsGeoJSON(ST_MakeValid(geometry)) as geojson
@@ -342,7 +384,6 @@ def apply_fallback_nearest_points(all_points: list, centroid: dict, max_distance
     return points_with_distance[:max_points]
 
 def categorize_water_level(depth):
-    """Categorize GWL depth"""
     if depth is None or depth < 0:
         return 'Recharge'
     elif depth < 30:
@@ -355,6 +396,216 @@ def categorize_water_level(depth):
         return 'Very Deep (>100m)'
 
 # =============================================================================
+# UNIFIED TIMESERIES HELPERS (FIXED)
+# =============================================================================
+
+def query_wells_monthly(boundary_geojson: str = None):
+    params = {}
+    where_clauses = []
+
+    if boundary_geojson:
+        where_clauses.append("""
+            ST_Intersects(
+                ST_GeomFromGeoJSON(:boundary_geojson),
+                ST_SetSRID(ST_MakePoint(
+                    COALESCE(NULLIF("LON", 0), "LONGITUD_1"),
+                    COALESCE(NULLIF("LAT", 0), "LATITUDE_1")
+                ), 4326)
+            )
+        """)
+        params["boundary_geojson"] = boundary_geojson
+
+    # Always require non-null GWL
+    where_clauses.append('"GWL" IS NOT NULL')
+
+    where_clause = ("WHERE " + "\n AND ".join(where_clauses)) if where_clauses else ""
+
+    query = text(f"""
+        SELECT 
+            DATE_TRUNC('month', "Date") as period,
+            AVG("GWL") as avg_gwl,
+            COUNT(*) as count
+        FROM groundwater_level
+        {where_clause}
+        GROUP BY DATE_TRUNC('month', "Date")
+        ORDER BY period;
+    """)
+    
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(query, params)
+            df = pd.DataFrame([
+                {"period": row[0], "avg_gwl": float(row[1]), "count": int(row[2])}
+                for row in result
+            ])
+            if not df.empty:
+                print(f"  ✓ Wells: {len(df)} months retrieved")
+            return df
+    except Exception as e:
+        print(f"  ❌ Wells query error: {e}")
+        return pd.DataFrame(columns=["period", "avg_gwl", "count"])
+
+def query_grace_monthly(boundary_geojson: str = None):
+    """
+    Query monthly average GRACE TWS (latitude-weighted) - FIXED
+    Uses EXACT same pattern as /api/grace endpoint
+    """
+    if not GRACE_BAND_MAPPING:
+        print("  ⚠️  GRACE band mapping is empty!")
+        return pd.DataFrame(columns=['period', 'avg_tws'])
+    
+    grace_data = []
+    successful = 0
+    errors = []
+    
+    for (year, month), band in sorted(GRACE_BAND_MAPPING.items()):
+        try:
+            period = datetime(year, month, 1)
+
+            # Extract all pixel centroids + values for the band (same as /api/grace)
+            query = text(f"""
+                SELECT
+                    ST_X(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as longitude,
+                    ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as latitude,
+                    (ST_PixelAsCentroids(rast, {band})).val as lwe_cm
+                FROM lwe_thickness_india
+                WHERE rid = 1
+            """)
+
+            with engine.connect() as conn:
+                result = conn.execute(query)
+                points = [
+                    {"longitude": float(r[0]), "latitude": float(r[1]), "val": float(r[2])}
+                    for r in result if r[2] is not None
+                ]
+
+            if not points:
+                continue
+
+            # If a spatial boundary is provided, filter points in Python (same fallback logic as /api/grace)
+            if boundary_geojson:
+                try:
+                    prepared_boundary = prep(shape(json.loads(boundary_geojson)))
+                except Exception:
+                    prepared_boundary = None
+
+                if prepared_boundary:
+                    points = filter_points_by_boundary(points, prepared_boundary)
+
+                if not points:
+                    continue
+
+            # Latitude-weighted average (use cos(lat) weighting)
+            from math import radians, cos
+            weights = [cos(radians(p["latitude"])) for p in points]
+            weighted_sum = sum(p["val"] * w for p, w in zip(points, weights))
+            total_weight = sum(weights)
+            if total_weight == 0:
+                continue
+            avg_val = weighted_sum / total_weight
+            grace_data.append({"period": period, "avg_tws": float(avg_val)})
+            successful += 1
+        
+        except Exception as e:
+            if len(errors) < 3:
+                errors.append(f"Band {band} ({year}-{month:02d}): {str(e)[:100]}")
+            continue
+    
+    print(f"  ✓ GRACE: {successful}/{len(GRACE_BAND_MAPPING)} months retrieved")
+    
+    if successful == 0:
+        print("  ⚠️  NO GRACE DATA RETRIEVED!")
+        if errors:
+            print(f"  → Sample error: {errors[0]}")
+    
+    return pd.DataFrame(grace_data) if grace_data else pd.DataFrame(columns=['period', 'avg_tws'])
+
+def query_rainfall_monthly(boundary_geojson: str = None):
+    """
+    Query monthly average rainfall (latitude-weighted) - FIXED
+    Uses EXACT same pattern as /api/rainfall endpoint
+    """
+    if not RAINFALL_TABLES:
+        print("  ⚠️  No rainfall tables found!")
+        return pd.DataFrame(columns=['period', 'avg_rainfall'])
+    
+    rainfall_data = []
+    successful = 0
+    errors = []
+    
+    for year, table_name in sorted(RAINFALL_TABLES.items()):
+        for month in range(1, 13):
+            try:
+                period = datetime(year, month, 1)
+                first_day, last_day = get_month_day_range(year, month)
+
+                daily_values = []
+
+                for doy in range(first_day, last_day + 1):
+                    # Extract pixel centroids for the day-band
+                    query = text(f"""
+                        SELECT
+                            ST_X(ST_SetSRID((ST_PixelAsCentroids(rast, {doy})).geom, 4326)) as longitude,
+                            ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, {doy})).geom, 4326)) as latitude,
+                            (ST_PixelAsCentroids(rast, {doy})).val as val
+                        FROM {table_name}
+                        WHERE rid = 1
+                    """)
+
+                    with engine.connect() as conn:
+                        result = conn.execute(query)
+                        points = [
+                            {"longitude": float(r[0]), "latitude": float(r[1]), "val": float(r[2])}
+                            for r in result if r[2] is not None and r[2] >= 0 and r[2] <= 500
+                        ]
+
+                    if not points:
+                        continue
+
+                    # Spatial filter if provided
+                    if boundary_geojson:
+                        try:
+                            prepared_boundary = prep(shape(json.loads(boundary_geojson)))
+                        except Exception:
+                            prepared_boundary = None
+
+                        if prepared_boundary:
+                            points = filter_points_by_boundary(points, prepared_boundary)
+
+                        if not points:
+                            continue
+
+                    # Latitude-weighted average per day
+                    from math import radians, cos
+                    weights = [cos(radians(p["latitude"])) for p in points]
+                    weighted_sum = sum(p["val"] * w for p, w in zip(points, weights))
+                    total_weight = sum(weights)
+                    if total_weight == 0:
+                        continue
+                    daily_avg = weighted_sum / total_weight
+                    daily_values.append(float(daily_avg))
+
+                if daily_values:
+                    avg_rainfall = sum(daily_values) / len(daily_values)
+                    rainfall_data.append({"period": period, "avg_rainfall": round(avg_rainfall, 2)})
+                    successful += 1
+            
+            except Exception as e:
+                if len(errors) < 3:
+                    errors.append(f"{year}-{month:02d}: {str(e)[:100]}")
+                continue
+    
+    total_expected = len(RAINFALL_TABLES) * 12
+    print(f"  ✓ Rainfall: {successful}/{total_expected} months retrieved")
+    
+    if successful == 0:
+        print("  ⚠️  NO RAINFALL DATA RETRIEVED!")
+        if errors:
+            print(f"  → Sample error: {errors[0]}")
+    
+    return pd.DataFrame(rainfall_data) if rainfall_data else pd.DataFrame(columns=['period', 'avg_rainfall'])
+
+# =============================================================================
 # ROOT ENDPOINT
 # =============================================================================
 
@@ -362,10 +613,13 @@ def categorize_water_level(depth):
 def root():
     return {
         "title": "GeoHydro API - Groundwater Monitoring System with AI Chatbot",
-        "version": "5.1.0",
-        "description": "API for groundwater data including wells, GRACE, rainfall, and AI chatbot with Dash-compatible seasonal decomposition",
+        "version": "6.1.0 (FIXED - GRACE & Rainfall NaN Issues Resolved)",
+        "description": "API for groundwater data including wells, GRACE, rainfall, and AI chatbot with unified timeseries",
         "chatbot_enabled": CHATBOT_ENABLED,
         "endpoints": {
+            "diagnostics": [
+                "GET /api/debug/raster-info - Diagnostic endpoint for troubleshooting"
+            ],
             "chatbot": [
                 "POST /api/chat - Ask questions to AI assistant (if enabled)"
             ],
@@ -381,7 +635,7 @@ def root():
             ],
             "wells": [
                 "GET /api/wells - Get well measurements (spatial filtering)",
-                "GET /api/wells/timeseries - Monthly/yearly aggregates with seasonal decomposition",
+                "GET /api/wells/timeseries - UNIFIED monthly timeseries (Wells + GRACE + Rainfall)",
                 "GET /api/wells/summary - Regional statistics",
                 "GET /api/wells/storage - Pre/post-monsoon storage",
                 "GET /api/wells/years - Available year range (dynamic)"
@@ -396,9 +650,178 @@ def root():
         },
         "docs": "/docs",
         "database_info": {
-            "grace_months_available": len(GRACE_BAND_MAPPING)
+            "grace_months_available": len(GRACE_BAND_MAPPING),
+            "rainfall_years_available": len(RAINFALL_TABLES)
         }
     }
+
+# =============================================================================
+# DIAGNOSTIC ENDPOINT
+# =============================================================================
+
+@app.get("/api/debug/raster-info")
+async def debug_raster_info(
+    state: Optional[str] = None,
+    district: Optional[str] = None
+):
+    try:
+        boundary_geojson = get_boundary_geojson(state, district)
+        
+        if not boundary_geojson:
+            return {"error": "Could not get boundary for specified state/district"}
+        
+        grace_check = None
+        grace_intersects = None
+        grace_test = None
+        grace_sample = []
+        
+        try:
+            with engine.connect() as conn:
+                grace_check = conn.execute(text("""
+                    SELECT 
+                        rid,
+                        ST_NumBands(rast) as num_bands,
+                        ST_AsText(ST_Envelope(rast::geometry)) as bbox,
+                        ST_SRID(rast::geometry) as srid,
+                        ST_Width(rast) as width,
+                        ST_Height(rast) as height
+                    FROM lwe_thickness_india
+                    WHERE rid = 1
+                """)).fetchone()
+                
+                grace_intersects = conn.execute(text("""
+                    SELECT ST_Intersects(
+                        rast::geometry,
+                        ST_GeomFromGeoJSON(:boundary)
+                    ) as intersects
+                    FROM lwe_thickness_india
+                    WHERE rid = 1
+                """), {"boundary": boundary_geojson}).fetchone()
+                
+                grace_sample = conn.execute(text("""
+                    WITH pixels AS (
+                        SELECT 
+                            (ST_PixelAsCentroids(rast, 1)).*
+                        FROM lwe_thickness_india
+                        WHERE rid = 1
+                        LIMIT 10
+                    )
+                    SELECT 
+                        ST_X(geom) as lon,
+                        ST_Y(geom) as lat,
+                        val
+                    FROM pixels
+                    WHERE val IS NOT NULL
+                """)).fetchall()
+                
+                grace_test = conn.execute(text("""
+                    WITH pixels AS (
+                        SELECT 
+                            (ST_PixelAsCentroids(rast, 1)).*
+                        FROM lwe_thickness_india
+                        WHERE rid = 1
+                    )
+                    SELECT 
+                        COUNT(*) as total_pixels,
+                        COUNT(*) FILTER (WHERE val IS NOT NULL) as non_null_pixels,
+                        COUNT(*) FILTER (
+                            WHERE val IS NOT NULL 
+                            AND ST_Intersects(geom, ST_GeomFromGeoJSON(:boundary))
+                        ) as intersecting_pixels,
+                        AVG(val) FILTER (
+                            WHERE val IS NOT NULL 
+                            AND ST_Intersects(geom, ST_GeomFromGeoJSON(:boundary))
+                        ) as avg_value
+                    FROM pixels
+                """), {"boundary": boundary_geojson}).fetchone()
+        except Exception as e:
+            print(f"GRACE check error: {e}")
+        
+        rainfall_info = []
+        for year, table_name in list(RAINFALL_TABLES.items())[:3]:
+            try:
+                with engine.connect() as conn:
+                    rf_check = conn.execute(text(f"""
+                        SELECT 
+                            ST_NumBands(rast) as num_bands,
+                            ST_AsText(ST_Envelope(rast::geometry)) as bbox
+                        FROM {table_name}
+                        WHERE rid = 1
+                        LIMIT 1
+                    """)).fetchone()
+                    
+                    rf_test = conn.execute(text(f"""
+                        WITH pixels AS (
+                            SELECT 
+                                (ST_PixelAsCentroids(rast, 1)).*
+                            FROM {table_name}
+                            WHERE rid = 1
+                        )
+                        SELECT 
+                            COUNT(*) FILTER (
+                                WHERE val IS NOT NULL 
+                                AND ST_Intersects(geom, ST_GeomFromGeoJSON(:boundary))
+                            ) as intersecting_pixels
+                        FROM pixels
+                    """), {"boundary": boundary_geojson}).fetchone()
+                    
+                    rainfall_info.append({
+                        "year": year,
+                        "table": table_name,
+                        "bands": rf_check[0] if rf_check else None,
+                        "bbox": rf_check[1] if rf_check else None,
+                        "intersecting_pixels": rf_test[0] if rf_test else 0
+                    })
+            except Exception as e:
+                rainfall_info.append({
+                    "year": year,
+                    "table": table_name,
+                    "error": str(e)[:200]
+                })
+        
+        return {
+            "status": "success",
+            "boundary": {
+                "state": state,
+                "district": district,
+                "has_geojson": boundary_geojson is not None
+            },
+            "grace": {
+                "rid": grace_check[0] if grace_check else None,
+                "num_bands": grace_check[1] if grace_check else None,
+                "bbox": grace_check[2] if grace_check else None,
+                "srid": grace_check[3] if grace_check else None,
+                "dimensions": f"{grace_check[4]}x{grace_check[5]}" if grace_check else None,
+                "boundary_intersects": grace_intersects[0] if grace_intersects else None,
+                "test_query": {
+                    "total_pixels": grace_test[0] if grace_test else 0,
+                    "non_null_pixels": grace_test[1] if grace_test else 0,
+                    "intersecting_pixels": grace_test[2] if grace_test else 0,
+                    "avg_value": float(grace_test[3]) if grace_test and grace_test[3] else None
+                },
+                "sample_pixels": [
+                    {"lon": p[0], "lat": p[1], "val": p[2]}
+                    for p in grace_sample
+                ] if grace_sample else []
+            },
+            "rainfall": {
+                "tables_found": len(RAINFALL_TABLES),
+                "years_range": f"{min(RAINFALL_TABLES.keys())}-{max(RAINFALL_TABLES.keys())}" if RAINFALL_TABLES else None,
+                "sample_tables": rainfall_info
+            },
+            "grace_band_mapping": {
+                "total_bands": len(GRACE_BAND_MAPPING),
+                "sample": dict(list(GRACE_BAND_MAPPING.items())[:5]),
+                "latest": dict(list(GRACE_BAND_MAPPING.items())[-5:])
+            }
+        }
+    
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 # =============================================================================
 # CHATBOT ENDPOINT
@@ -406,7 +829,6 @@ def root():
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """Chat endpoint to answer groundwater and remote sensing questions"""
     if not CHATBOT_ENABLED:
         raise HTTPException(
             status_code=503, 
@@ -414,24 +836,19 @@ async def chat(request: ChatRequest):
         )
     
     try:
-        # Get context from vector store
         context = retrieve_context_fn(request.question)
         sources_count = len(context.split("Source:")) - 1
         
-        # Invoke the chain with map context
         result = chatbot_chain.invoke({
             "question": request.question,
             "map_context": request.map_context or {}
         })
         
-        # Clean the response - remove trailing artifacts
         answer = result.content.strip()
         
-        # Remove trailing single digits that are artifacts
         while answer and answer[-1].isdigit() and (len(answer) < 2 or not answer[-2].isdigit()):
             answer = answer[:-1].strip()
         
-        # Remove trailing punctuation artifacts
         answer = answer.rstrip('.,;: ')
         
         return ChatResponse(
@@ -449,7 +866,6 @@ async def chat(request: ChatRequest):
 
 @app.get("/api/states")
 def get_all_states():
-    """Get list of all states"""
     query = text("""
         SELECT DISTINCT "State"
         FROM public.district_state
@@ -466,7 +882,6 @@ def get_all_states():
 
 @app.get("/api/districts/{state_name}")
 def get_districts(state_name: str):
-    """Get all districts in a state"""
     query = text("""
         SELECT 
             "District",
@@ -500,7 +915,6 @@ def get_districts(state_name: str):
 
 @app.get("/api/district/{state_name}/{district_name}")
 def get_district(state_name: str, district_name: str):
-    """Get specific district details"""
     query = text("""
         SELECT 
             "District",
@@ -544,7 +958,6 @@ def get_district(state_name: str, district_name: str):
 
 @app.get("/api/aquifers")
 def get_all_aquifers():
-    """Get all aquifers"""
     query = text("""
         SELECT 
             aquifer, aquifers, zone_m, mbgl, avg_mbgl,
@@ -574,7 +987,6 @@ def get_all_aquifers():
 
 @app.get("/api/aquifers/state/{state_name}")
 def get_aquifers_by_state(state_name: str):
-    """Get aquifers for a specific state using spatial intersection"""
     state_boundary_query = text("""
         SELECT ST_AsGeoJSON(ST_Union(ST_MakeValid(geometry))) as geojson
         FROM public.district_state
@@ -637,7 +1049,6 @@ def get_aquifers_by_state(state_name: str):
 
 @app.get("/api/aquifers/district/{state_name}/{district_name}")
 def get_aquifers_by_district(state_name: str, district_name: str):
-    """Get aquifers for a specific district using spatial intersection"""
     district_query = text("""
         SELECT ST_AsGeoJSON(ST_MakeValid(geometry)) as geojson
         FROM public.district_state
@@ -718,7 +1129,6 @@ def get_groundwater_wells(
     end_date: Optional[str] = Query(None),
     max_points: int = Query(5000, ge=100, le=50000)
 ):
-    """Get groundwater well measurements using SPATIAL FILTERING"""
     where_conditions = []
     params = {}
     
@@ -898,270 +1308,218 @@ def get_wells_timeseries(
     aggregation: str = Query("monthly", regex="^(monthly|yearly)$"),
     view: str = Query("raw", regex="^(raw|seasonal|deseasonalized)$")
 ):
-    """
-    Get aggregated well timeseries with seasonal decomposition (Dash-compatible)
     
-    Parameters:
-    - view: 'raw' (original data), 'seasonal' (repeating pattern only), 'deseasonalized' (trend + residual)
-    - aggregation: 'monthly' or 'yearly' (forced to monthly for seasonal/deseasonalized)
-    """
+    print(f"\n🔄 Querying unified timeseries for state={state}, district={district}")
     
     boundary_geojson = get_boundary_geojson(state, district) if (state or district) else None
     
-    where_clause = ""
-    params = {}
-    
-    if boundary_geojson:
-        where_clause = """
-            WHERE ST_Intersects(
-                ST_GeomFromGeoJSON(:boundary_geojson),
-                ST_SetSRID(ST_MakePoint(
-                    COALESCE(NULLIF("LON", 0), "LONGITUD_1"),
-                    COALESCE(NULLIF("LAT", 0), "LATITUDE_1")
-                ), 4326)
-            )
-        """
-        params["boundary_geojson"] = boundary_geojson
-    
-    # ✅ FORCE MONTHLY for decomposition (DASH LOGIC)
     if view in ["seasonal", "deseasonalized"]:
         aggregation = "monthly"
     
-    if aggregation == "monthly":
-        query = text(f"""
-            SELECT 
-                DATE_TRUNC('month', "Date") as period,
-                AVG("GWL") as avg_gwl,
-                COUNT(*) as count
-            FROM groundwater_level
-            {where_clause}
-            AND "GWL" IS NOT NULL
-            GROUP BY DATE_TRUNC('month', "Date")
-            ORDER BY period;
-        """)
-    else:
-        query = text(f"""
-            SELECT 
-                DATE_TRUNC('year', "Date") as period,
-                AVG("GWL") as avg_gwl,
-                COUNT(*) as count
-            FROM groundwater_level
-            {where_clause}
-            AND "GWL" IS NOT NULL
-            GROUP BY DATE_TRUNC('year', "Date")
-            ORDER BY period;
-        """)
+    print("  📊 Querying wells...")
+    wells_df = query_wells_monthly(boundary_geojson)
     
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(query, params)
+    print("  🛰️  Querying GRACE...")
+    grace_df = query_grace_monthly(boundary_geojson)
+    
+    print("  🌧️  Querying rainfall...")
+    rainfall_df = query_rainfall_monthly(boundary_geojson)
+    
+    print("  🔗 Merging timeseries...")
+    if not wells_df.empty:
+        combined = wells_df.copy()
+    else:
+        combined = pd.DataFrame(columns=["period"])
+    
+    if not grace_df.empty:
+        combined = combined.merge(grace_df, on="period", how="outer")
+    else:
+        combined["avg_tws"] = np.nan
+    
+    if not rainfall_df.empty:
+        combined = combined.merge(rainfall_df, on="period", how="outer")
+    else:
+        combined["avg_rainfall"] = np.nan
+    
+    combined = combined.sort_values("period").reset_index(drop=True)
+    
+    if combined.empty:
+        return {
+            "view": view,
+            "aggregation": aggregation,
+            "filters": {"state": state, "district": district},
+            "count": 0,
+            "timeseries": [],
+            "statistics": None,
+            "error": "No data available for this region",
+            "message": "Run /api/debug/raster-info to diagnose the issue"
+        }
+    
+    print("  🔧 Interpolating missing values...")
+    combined = combined.set_index("period")
+    combined = combined.interpolate(method="time", limit_direction="both")
+    combined = combined.reset_index()
+    
+    print(f"  ✓ Merged timeseries: {len(combined)} months")
+    
+    if view in ["seasonal", "deseasonalized"] and len(combined) >= 24:
+        print(f"  📈 Performing {view} decomposition...")
+        df = combined.copy()
+        df = df.set_index("period")
+        
+        output_timeseries = []
+        statistics = {}
+        
+        for col, component_name in [("avg_gwl", "gwl"), ("avg_tws", "grace"), ("avg_rainfall", "rainfall")]:
+            if col not in df.columns or df[col].isna().all():
+                continue
             
-            timeseries = []
-            for row in result:
-                timeseries.append({
-                    "date": row[0].isoformat(),
-                    "avg_gwl": round(float(row[1]), 2),
-                    "count": int(row[2])
-                })
+            series = df[col].dropna()
+            if len(series) < 24:
+                continue
             
-            if not timeseries:
-                return {
-                    "view": view,
-                    "aggregation": aggregation,
-                    "filters": {"state": state, "district": district},
-                    "count": 0,
-                    "timeseries": [],
-                    "statistics": None
-                }
-            
-            # ============= SEASONAL DECOMPOSITION (DASH LOGIC) =============
-            if view in ["seasonal", "deseasonalized"] and len(timeseries) >= 24:
-                df = pd.DataFrame(timeseries)
-                df['date'] = pd.to_datetime(df['date'])
-                df = df.set_index('date')
-                
-                # Perform decomposition
-                decomp = seasonal_decompose(df['avg_gwl'], model='additive', period=12)
-                
-                # Prepare output based on view
-                output_timeseries = []
+            try:
+                decomp = seasonal_decompose(series, model='additive', period=12)
                 
                 if view == "seasonal":
-                    # Return ONLY seasonal component
-                    for idx in df.index:
+                    for idx in series.index:
                         if pd.notna(decomp.seasonal[idx]):
                             output_timeseries.append({
                                 "date": idx.isoformat(),
-                                "value": round(float(decomp.seasonal[idx]), 2),
-                                "component": "seasonal"
+                                f"{component_name}_seasonal": round(float(decomp.seasonal[idx]), 2)
                             })
-                    
-                    # Calculate seasonal amplitude
-                    seasonal_vals = decomp.seasonal.dropna()
-                    statistics = {
-                        "seasonal_amplitude": round(float(seasonal_vals.max() - seasonal_vals.min()), 2),
-                        "seasonal_mean": round(float(seasonal_vals.mean()), 2),
-                        "view": "seasonal",
-                        "note": "Shows repeating 12-month pattern only"
-                    }
                 
                 elif view == "deseasonalized":
-                    # Return trend + residual (no seasonality)
                     deseasonalized = decomp.trend + decomp.resid
-                    
-                    for idx in df.index:
+                    for idx in series.index:
                         if pd.notna(deseasonalized[idx]):
                             output_timeseries.append({
                                 "date": idx.isoformat(),
-                                "value": round(float(deseasonalized[idx]), 2),
-                                "component": "deseasonalized"
+                                f"{component_name}_deseasonalized": round(float(deseasonalized[idx]), 2)
                             })
                     
-                    # Calculate trend statistics (DASH LOGIC)
                     deseas_clean = deseasonalized.dropna()
                     if len(deseas_clean) >= 2:
                         x = np.arange(len(deseas_clean))
                         y = deseas_clean.values
                         slope, intercept, r_value, p_value, std_err = linregress(x, y)
                         
-                        # Calculate trendline values for plotting
-                        trendline = []
-                        for i, idx in enumerate(deseas_clean.index):
-                            trendline.append({
-                                "date": idx.isoformat(),
-                                "trendline_value": round(float(slope * i + intercept), 2)
-                            })
-                        
-                        statistics = {
-                            "trend_slope_m_per_month": round(float(slope), 4),
-                            "trend_slope_m_per_year": round(float(slope * 12), 4),
+                        statistics[f"{component_name}_trend"] = {
+                            "slope_per_month": round(float(slope), 4),
+                            "slope_per_year": round(float(slope * 12), 4),
                             "r_squared": round(float(r_value ** 2), 3),
                             "p_value": round(float(p_value), 4),
-                            "trend_direction": "declining" if slope > 0 else "recovering",
-                            "significance": "significant" if p_value < 0.05 else "not_significant",
-                            "trendline": trendline,
-                            "view": "deseasonalized",
-                            "note": "Seasonal pattern removed, showing long-term trend"
+                            "direction": "declining" if slope > 0 else "recovering",
+                            "significance": "significant" if p_value < 0.05 else "not_significant"
                         }
-                    else:
-                        statistics = {
-                            "error": "Insufficient data for trend calculation",
-                            "view": "deseasonalized"
-                        }
-                
-                return {
-                    "view": view,
-                    "aggregation": "monthly",
-                    "filters": {"state": state, "district": district},
-                    "count": len(output_timeseries),
-                    "chart_config": {
-                        "gwl_chart_type": "line",
-                        "rainfall_chart_type": "line",
-                        "rainfall_field": "value",
-                        "rainfall_unit": "mm/day (component)",
-                        "gwl_y_axis_reversed": True
-                    },
-                    "timeseries": output_timeseries,
-                    "statistics": statistics
-                }
             
-            # ============= RAW VIEW (DASH-COMPATIBLE) =============
-            elif view == "raw":
-                # ✅ ENHANCEMENT: Add monthly rainfall totals (DASH LOGIC)
-                enhanced_timeseries = []
-                for item in timeseries:
-                    new_item = item.copy()
-                    
-                    # Calculate monthly rainfall total (mm/day × days in month)
-                    # Note: avg_rainfall not in current query, but keeping structure ready
-                    date = pd.to_datetime(item["date"])
-                    days_in_month = date.days_in_month
-                    new_item["days_in_month"] = days_in_month
-                    
-                    # If rainfall data exists, convert to monthly total
-                    if "avg_rainfall" in new_item and new_item.get("avg_rainfall") is not None:
-                        new_item["monthly_rainfall_mm"] = round(
-                            new_item["avg_rainfall"] * days_in_month, 2
-                        )
-                    
-                    enhanced_timeseries.append(new_item)
-                
-                # Calculate basic statistics for raw data
-                df = pd.DataFrame(timeseries)
-                df['date'] = pd.to_datetime(df['date'])
-                df = df.set_index('date')
-                
-                if len(df) >= 2:
-                    x = np.arange(len(df))
-                    y = df['avg_gwl'].values
+            except Exception as e:
+                print(f"    ⚠️  Error decomposing {col}: {e}")
+                continue
+        
+        if view == "seasonal":
+            df_out = pd.DataFrame(output_timeseries)
+            if not df_out.empty:
+                df_out = df_out.groupby("date").first().reset_index()
+                output_timeseries = df_out.to_dict("records")
+        
+        elif view == "deseasonalized":
+            df_out = pd.DataFrame(output_timeseries)
+            if not df_out.empty:
+                df_out = df_out.groupby("date").first().reset_index()
+                output_timeseries = df_out.to_dict("records")
+        
+        return {
+            "view": view,
+            "aggregation": "monthly",
+            "filters": {"state": state, "district": district},
+            "count": len(output_timeseries),
+            "chart_config": {
+                "gwl_chart_type": "line",
+                "grace_chart_type": "line",
+                "rainfall_chart_type": "line",
+                "gwl_y_axis_reversed": True
+            },
+            "timeseries": output_timeseries,
+            "statistics": statistics
+        }
+    
+    elif view == "raw":
+        print("  📦 Preparing raw view...")
+        enhanced_timeseries = []
+        for _, row in combined.iterrows():
+            item = {
+                "date": row["period"].isoformat(),
+                "avg_gwl": round(float(row["avg_gwl"]), 2) if pd.notna(row["avg_gwl"]) else None,
+                "avg_tws": round(float(row["avg_tws"]), 2) if pd.notna(row["avg_tws"]) else None,
+                "avg_rainfall": round(float(row["avg_rainfall"]), 2) if pd.notna(row["avg_rainfall"]) else None,
+            }
+            
+            date = pd.to_datetime(row["period"])
+            days_in_month = date.days_in_month
+            item["days_in_month"] = days_in_month
+            
+            if pd.notna(row.get("avg_rainfall")):
+                item["monthly_rainfall_mm"] = round(float(row["avg_rainfall"]) * days_in_month, 2)
+            
+            enhanced_timeseries.append(item)
+        
+        statistics = {}
+        
+        for col, name in [("avg_gwl", "gwl"), ("avg_tws", "grace"), ("avg_rainfall", "rainfall")]:
+            if col in combined.columns:
+                series = combined[col].dropna()
+                if len(series) >= 2:
+                    x = np.arange(len(series))
+                    y = series.values
                     slope, intercept, r_value, p_value, std_err = linregress(x, y)
                     
-                    # Calculate trendline
-                    trendline = []
-                    for i, idx in enumerate(df.index):
-                        trendline.append({
-                            "date": idx.isoformat(),
-                            "trendline_value": round(float(slope * i + intercept), 2)
-                        })
-                    
-                    multiplier = 12 if aggregation == "monthly" else 1
-                    
-                    statistics = {
-                        "mean_gwl": round(float(np.mean(y)), 2),
-                        "min_gwl": round(float(np.min(y)), 2),
-                        "max_gwl": round(float(np.max(y)), 2),
-                        "std_gwl": round(float(np.std(y)), 2),
-                        "trend_slope_m_per_year": round(float(slope * multiplier), 4),
+                    statistics[f"{name}_trend"] = {
+                        "mean": round(float(np.mean(y)), 2),
+                        "min": round(float(np.min(y)), 2),
+                        "max": round(float(np.max(y)), 2),
+                        "std": round(float(np.std(y)), 2),
+                        "slope_per_year": round(float(slope * 12), 4),
                         "r_squared": round(float(r_value ** 2), 3),
                         "p_value": round(float(p_value), 4),
-                        "trend_direction": "declining" if slope > 0 else "recovering",
-                        "significance": "significant" if p_value < 0.05 else "not_significant",
-                        "trendline": trendline,
-                        "view": "raw",
-                        "note": "Original data with seasonality intact. Rainfall shown as monthly totals (when available)."
+                        "direction": "declining" if slope > 0 else "recovering",
+                        "significance": "significant" if p_value < 0.05 else "not_significant"
                     }
-                else:
-                    statistics = None
-                
-                return {
-                    "view": view,
-                    "aggregation": aggregation,
-                    "filters": {"state": state, "district": district},
-                    "count": len(timeseries),
-                    "chart_config": {  # ✅ DASH-COMPATIBLE CONFIG
-                        "gwl_chart_type": "line",
-                        "rainfall_chart_type": "bar",
-                        "rainfall_field": "monthly_rainfall_mm",
-                        "rainfall_unit": "mm/month",
-                        "gwl_y_axis_reversed": True
-                    },
-                    "timeseries": enhanced_timeseries,  # ✅ With monthly totals
-                    "statistics": statistics
-                }
-            
-            else:
-                # Not enough data for decomposition
-                return {
-                    "view": view,
-                    "aggregation": aggregation,
-                    "filters": {"state": state, "district": district},
-                    "count": len(timeseries),
-                    "timeseries": timeseries,
-                    "statistics": None,
-                    "error": f"Need at least 24 months of data for {view} view (have {len(timeseries)} months)"
-                }
+        
+        return {
+            "view": view,
+            "aggregation": aggregation,
+            "filters": {"state": state, "district": district},
+            "count": len(enhanced_timeseries),
+            "chart_config": {
+                "gwl_chart_type": "line",
+                "grace_chart_type": "line",
+                "rainfall_chart_type": "bar",
+                "rainfall_field": "monthly_rainfall_mm",
+                "rainfall_unit": "mm/month",
+                "gwl_y_axis_reversed": True
+            },
+            "timeseries": enhanced_timeseries,
+            "statistics": statistics,
+            "note": "Unified timeseries combining Wells, GRACE, and Rainfall data"
+        }
     
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
+    else:
+        return {
+            "view": view,
+            "aggregation": aggregation,
+            "filters": {"state": state, "district": district},
+            "count": len(combined),
+            "timeseries": combined.to_dict("records"),
+            "statistics": None,
+            "error": f"Need at least 24 months of data for {view} view (have {len(combined)} months)"
+        }
 
 @app.get("/api/wells/summary")
 def get_wells_summary(
     state: Optional[str] = Query(None),
     district: Optional[str] = Query(None)
 ):
-    """Get regional statistics including trends"""
     
     boundary_geojson = get_boundary_geojson(state, district) if (state or district) else None
     
@@ -1248,7 +1606,6 @@ def get_wells_storage(
     start_year: Optional[int] = Query(None),
     end_year: Optional[int] = Query(None)
 ):
-    """Calculate pre/post-monsoon storage fluctuation"""
     
     boundary_geojson = get_boundary_geojson(state, district) if (state or district) else None
     
@@ -1374,7 +1731,6 @@ def get_wells_storage(
 
 @app.get("/api/wells/years")
 def get_wells_years():
-    """Get available year range for wells data"""
     query = text("""
         SELECT 
             MIN(EXTRACT(YEAR FROM "Date")) as min_year,
@@ -1419,7 +1775,6 @@ def get_wells_years():
 
 @app.get("/api/grace/available")
 def get_grace_available():
-    """Get available GRACE months"""
     if not GRACE_BAND_MAPPING:
         return {"error": "GRACE mappings not loaded yet"}
     by_year = {}
@@ -1446,7 +1801,6 @@ def get_grace(
     sample_rate: int = Query(1, ge=1, le=20),
     max_points: int = Query(10000, ge=100, le=50000)
 ):
-    """Get GRACE data with proper missing month handling"""
     
     if month is not None:
         try:
@@ -1593,7 +1947,6 @@ def get_rainfall(
     sample_rate: int = Query(1, ge=1, le=50),
     max_points: int = Query(10000, ge=100, le=50000)
 ):
-    """Get Rainfall data - Returns AVERAGE daily rainfall (mm/day)"""
     
     table_name = f"rf25_ind{year}_rfp25"
     check_query = text("""
@@ -1718,7 +2071,6 @@ def get_rainfall(
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint"""
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
@@ -1729,16 +2081,1824 @@ def health_check():
             "status": "healthy",
             "database": "connected",
             "grace_bands": len(GRACE_BAND_MAPPING),
+            "rainfall_years": len(RAINFALL_TABLES),
             "chatbot": chatbot_status,
-            "version": "5.1.0",
+            "version": "6.1.0 - FIXED (GRACE & Rainfall NaN Issues Resolved)",
             "features": [
+                "Unified timeseries (Wells + GRACE + Rainfall)",
+                "FIXED: GRACE queries use same pattern as /api/grace",
+                "FIXED: Rainfall queries use same pattern as /api/rainfall",
+                "Diagnostic endpoint for troubleshooting",
                 "Dash-compatible seasonal decomposition",
-                "Monthly rainfall totals for raw view",
-                "Frontend chart configuration guidance"
+                "Latitude-weighted spatial aggregation"
             ]
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+def haversine_distance_vectorized(lat1, lon1, lat2, lon2):
+    """Calculate haversine distance in km"""
+    R = 6371.0
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    return R * c
+
+def standardize_series(series):
+    """Standardize a series to z-scores"""
+    series = pd.Series(series).astype(float)
+    if series.dropna().nunique() < 2:
+        return pd.Series(np.zeros(len(series)))
+    scaler = StandardScaler()
+    return pd.Series(scaler.fit_transform(series.values.reshape(-1, 1)).flatten())
+
+def get_wells_for_analysis(boundary_geojson: str = None):
+    """Get all wells data for analysis"""
+    where_clause = ""
+    params = {}
+    
+    if boundary_geojson:
+        where_clause = """
+            WHERE ST_Intersects(
+                ST_GeomFromGeoJSON(:boundary_geojson),
+                ST_SetSRID(ST_MakePoint(
+                    COALESCE(NULLIF("LON", 0), "LONGITUD_1"),
+                    COALESCE(NULLIF("LAT", 0), "LATITUDE_1")
+                ), 4326)
+            )
+        """
+        params["boundary_geojson"] = boundary_geojson
+    
+    query = text(f"""
+        SELECT 
+            "Date",
+            "GWL",
+            COALESCE(NULLIF("LAT", 0), "LATITUDE_1") as latitude,
+            COALESCE(NULLIF("LON", 0), "LONGITUD_1") as longitude,
+            "STATE_UT" as state,
+            "DISTRICT" as district
+        FROM groundwater_level
+        {where_clause}
+        AND "GWL" IS NOT NULL
+        AND "Date" IS NOT NULL
+        ORDER BY "Date"
+    """)
+    
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(query, params)
+            df = pd.DataFrame([
+                {
+                    "date": row[0],
+                    "gwl": float(row[1]),
+                    "latitude": float(row[2]),
+                    "longitude": float(row[3]),
+                    "state": row[4],
+                    "district": row[5],
+                    "site_id": f"{round(float(row[2]), 5)}_{round(float(row[3]), 5)}"
+                }
+                for row in result
+            ])
+            return df
+    except Exception as e:
+        print(f"Error getting wells: {e}")
+        return pd.DataFrame()
+
+def get_aquifer_properties(boundary_geojson: str = None):
+    """Get aquifer properties for the region"""
+    where_clause = ""
+    params = {}
+    
+    if boundary_geojson:
+        where_clause = "WHERE ST_Intersects(ST_MakeValid(geometry), ST_GeomFromGeoJSON(:boundary_geojson))"
+        params["boundary_geojson"] = boundary_geojson
+    
+    query = text(f"""
+        SELECT 
+            aquifer,
+            aquifers as majoraquif,
+            yeild__,
+            ST_Area(ST_Transform(ST_MakeValid(geometry), 32643)) as area_m2,
+            ST_AsGeoJSON(ST_Centroid(geometry)) as centroid
+        FROM major_aquifers
+        {where_clause}
+    """)
+    
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(query, params)
+            aquifers = []
+            for row in result:
+                centroid = json.loads(row[4])
+                aquifers.append({
+                    "aquifer": row[0],
+                    "majoraquif": row[1],
+                    "yield": row[2],
+                    "area_m2": float(row[3]) if row[3] else 0,
+                    "latitude": centroid["coordinates"][1],
+                    "longitude": centroid["coordinates"][0]
+                })
+            return pd.DataFrame(aquifers)
+    except Exception as e:
+        print(f"Error getting aquifers: {e}")
+        return pd.DataFrame()
+
+def get_aquifer_polygons(boundary_geojson: str = None):
+    """Get aquifer polygons, optionally clipped to boundary"""
+    where_clause = ""
+    geometry_select = "ST_MakeValid(geometry)"
+    params = {}
+    
+    if boundary_geojson:
+        # Clip polygons to boundary AND filter to overlapping ones
+        where_clause = """
+            WHERE ST_Intersects(
+                ST_MakeValid(geometry), 
+                ST_GeomFromGeoJSON(:boundary_geojson)
+            )
+        """
+        # Clip geometry to boundary (like robust_clip_to_boundary in Dash)
+        geometry_select = """
+            ST_Intersection(
+                ST_MakeValid(geometry),
+                ST_GeomFromGeoJSON(:boundary_geojson)
+            )
+        """
+        params["boundary_geojson"] = boundary_geojson
+    
+    query = text(f"""
+        SELECT 
+            aquifer,
+            aquifers as majoraquif,
+            yeild__,
+            ST_Area(ST_Transform({geometry_select}, 32643)) as area_m2,
+            ST_AsGeoJSON({geometry_select}) as geometry
+        FROM major_aquifers
+        {where_clause}
+    """)
+    
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(query, params)
+            aquifers = []
+            
+            for row in result:
+                try:
+                    geom_json = json.loads(row[4])
+                    
+                    # Skip empty geometries after clipping
+                    if not geom_json.get('coordinates'):
+                        continue
+                    
+                    aquifers.append({
+                        "aquifer": row[0],
+                        "majoraquif": row[1],
+                        "yield": row[2],
+                        "area_m2": float(row[3]) if row[3] else 0,
+                        "geometry": geom_json
+                    })
+                except Exception as e:
+                    print(f"Error parsing aquifer geometry: {e}")
+                    continue
+            
+            return aquifers
+            
+    except Exception as e:
+        print(f"Error getting aquifer polygons: {e}")
+        print(traceback.format_exc())
+        return []
+# =============================================================================
+# ADVANCED MODULE 1: AQUIFER SUITABILITY INDEX (ASI)
+# =============================================================================
+
+@app.get("/api/advanced/asi")
+def aquifer_suitability_index(
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None)
+):
+    """
+    Calculate Aquifer Suitability Index (ASI) - a 0-5 score indicating 
+    storage/transmission potential based on specific yield or lithology.
+    """
+    try:
+        boundary_geojson = get_boundary_geojson(state, district)
+        
+        # Get aquifer polygons as list of dicts
+        aquifers_list = get_aquifer_polygons(boundary_geojson)
+        
+        if not aquifers_list:
+            raise HTTPException(status_code=404, detail="No aquifer data for this region")
+        
+        # Convert to DataFrame for easier processing
+        aquifers_df = pd.DataFrame(aquifers_list)
+        
+        # Lithology-based specific yield mapping
+        sy_map = {
+            'alluvium': 0.10,
+            'sandstone': 0.06,
+            'limestone': 0.05,
+            'basalt': 0.03,
+            'granite': 0.02
+        }
+        
+        # Parse specific yield from yield field or use lithology fallback
+        def get_sy(row):
+            yield_str = str(row.get('yield', '')).lower()
+            
+            # Try to extract numeric values from yield field
+            try:
+                import re
+                numbers = re.findall(r'\d+\.?\d*', yield_str)
+                if numbers:
+                    vals = [float(n) for n in numbers]
+                    return sum(vals) / len(vals) / 100.0
+            except:
+                pass
+            
+            # Fallback to lithology mapping
+            majoraquif = str(row.get('majoraquif', '')).lower()
+            for key, val in sy_map.items():
+                if key in majoraquif:
+                    return val
+            
+            return 0.04
+        
+        # Calculate specific yield for each polygon
+        aquifers_df['specific_yield'] = aquifers_df.apply(get_sy, axis=1)
+        
+        # Normalize to 0-5 scale using quantile stretching
+        sy = aquifers_df['specific_yield'].values
+        q_low, q_high = np.quantile(sy, 0.05), np.quantile(sy, 0.95)
+        
+        if q_high - q_low < 1e-6:
+            q_low, q_high = 0.01, 0.15
+        
+        # Calculate ASI score
+        aquifers_df['asi_score'] = (
+            (sy.clip(q_low, q_high) - q_low) / (q_high - q_low) * 5.0
+        ).clip(0, 5)
+        
+        # Build GeoJSON FeatureCollection manually
+        features = []
+        for idx, row in aquifers_df.iterrows():
+            features.append({
+                "type": "Feature",
+                "id": str(idx),
+                "properties": {
+                    "aquifer": row['aquifer'],
+                    "majoraquif": row['majoraquif'],
+                    "asi_score": float(row['asi_score']),
+                    "specific_yield": float(row['specific_yield']),
+                    "area_m2": float(row['area_m2'])
+                },
+                "geometry": row['geometry']  # Already GeoJSON format
+            })
+        
+        geojson_data = {
+            "type": "FeatureCollection",
+            "features": features
+        }
+        
+        # Calculate statistics
+        statistics = {
+            "mean_asi": round(float(aquifers_df['asi_score'].mean()), 2),
+            "median_asi": round(float(aquifers_df['asi_score'].median()), 2),
+            "std_asi": round(float(aquifers_df['asi_score'].std()), 2),
+            "min_asi": round(float(aquifers_df['asi_score'].min()), 2),
+            "max_asi": round(float(aquifers_df['asi_score'].max()), 2),
+            "dominant_aquifer": aquifers_df['majoraquif'].mode().iloc[0] if len(aquifers_df) > 0 else None,
+            "avg_specific_yield": round(float(aquifers_df['specific_yield'].mean()), 4),
+            "total_area_km2": round(float(aquifers_df['area_m2'].sum()) / 1_000_000, 2)
+        }
+        
+        return {
+            "module": "ASI",
+            "description": "Aquifer Suitability Index (0-5 scale, higher = better storage/transmission potential)",
+            "filters": {"state": state, "district": district},
+            "statistics": statistics,
+            "count": len(aquifers_df),
+            "geojson": geojson_data,
+            "methodology": {
+                "approach": "Lithology-based or yield-derived specific yield, normalized to 0-5 scale",
+                "quantile_stretch": {"low": round(float(q_low), 4), "high": round(float(q_high), 4)}
+            }
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ASI Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# =============================================================================
+# ADVANCED MODULE 2: WELL NETWORK DENSITY ANALYSIS (POINT PROCESS)
+# =============================================================================
+
+@app.get("/api/advanced/network-density")
+def well_network_density(
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    radius_km: float = Query(20.0, ge=5.0, le=100.0)
+):
+    """
+    Analyze well network density and signal strength
+    Returns: strength (|slope|/σ) and local density for each site
+    """
+    try:
+        boundary_geojson = get_boundary_geojson(state, district)
+        wells_df = get_wells_for_analysis(boundary_geojson)
+        
+        if wells_df.empty:
+            raise HTTPException(status_code=404, detail="No well data for this region")
+        
+        # Calculate slope and std for each site
+        site_stats = []
+        for site_id, group in wells_df.groupby('site_id'):
+            if len(group) < 6:
+                continue
+            
+            group = group.sort_values('date')
+            days = (group['date'] - group['date'].min()).dt.days.values
+            gwl = group['gwl'].values
+            
+            if len(np.unique(days)) < 2:
+                continue
+            
+            slope, _, _, _, _ = linregress(days, gwl)
+            std = np.std(gwl)
+            
+            site_stats.append({
+                'site_id': site_id,
+                'latitude': group['latitude'].iloc[0],
+                'longitude': group['longitude'].iloc[0],
+                'slope_m_per_year': slope * 365.25,
+                'gwl_std': std,
+                'strength': abs(slope * 365.25) / (std if std > 0 else 1e-6),
+                'n_observations': len(group)
+            })
+        
+        if not site_stats:
+            raise HTTPException(status_code=404, detail="Insufficient data for analysis")
+        
+        sites_df = pd.DataFrame(site_stats)
+        
+        # Calculate local density using haversine
+        coords = sites_df[['latitude', 'longitude']].values
+        coords_rad = np.radians(coords)
+        
+        R_earth = 6371.0
+        nbrs = NearestNeighbors(radius=radius_km/R_earth, metric='haversine').fit(coords_rad)
+        neighbors = nbrs.radius_neighbors(coords_rad, return_distance=False)
+        
+        # Count neighbors (excluding self)
+        density_counts = np.array([len(n) - 1 for n in neighbors])
+        area_km2 = np.pi * (radius_km ** 2)
+        sites_df['local_density_per_km2'] = density_counts / area_km2
+        sites_df['neighbors_within_radius'] = density_counts
+        
+        results = sites_df.to_dict('records')
+        
+        return {
+            "module": "NETWORK_DENSITY",
+            "description": f"Well network analysis with {radius_km}km radius",
+            "filters": {"state": state, "district": district},
+            "parameters": {"radius_km": radius_km},
+            "statistics": {
+                "total_sites": len(results),
+                "avg_strength": round(float(sites_df['strength'].mean()), 3),
+                "avg_density": round(float(sites_df['local_density_per_km2'].mean()), 4),
+                "median_observations": int(sites_df['n_observations'].median())
+            },
+            "count": len(results),
+            "data": results
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Network Density Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# =============================================================================
+# ADVANCED MODULE 3: SPATIO-TEMPORAL AQUIFER STRESS SCORE (SASS)
+# =============================================================================
+
+@app.get("/api/advanced/sass")
+def aquifer_stress_score(
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    year: int = Query(..., ge=2002, le=2024),
+    month: int = Query(..., ge=1, le=12)
+):
+    """
+    Calculate composite stress score: SASS = 0.5*(-z_GWL) + 0.3*z_GRACE + 0.2*z_Rain
+    """
+    try:
+        boundary_geojson = get_boundary_geojson(state, district)
+        target_date = datetime(year, month, 15)
+        tolerance = timedelta(days=60)
+        
+        # Get wells data
+        wells_df = get_wells_for_analysis(boundary_geojson)
+        if wells_df.empty:
+            raise HTTPException(status_code=404, detail="No well data")
+        
+        wells_df['date_diff'] = abs(wells_df['date'] - target_date)
+        near_wells = wells_df[wells_df['date_diff'] <= tolerance].sort_values('date_diff').groupby('site_id').first().reset_index()
+        
+        if near_wells.empty:
+            raise HTTPException(status_code=404, detail="No wells near target date")
+        
+        # Standardize GWL
+        gwl_z = standardize_series(near_wells['gwl'].values)
+        
+        # Get GRACE data
+        try:
+            band = grace_date_to_band(year, month)
+            query = text(f"""
+                SELECT 
+                    ST_X(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as longitude,
+                    ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as latitude,
+                    (ST_PixelAsCentroids(rast, {band})).val as tws
+                FROM lwe_thickness_india WHERE rid = 1
+            """)
+            
+            with engine.connect() as conn:
+                result = conn.execute(query)
+                grace_points = pd.DataFrame([
+                    {"longitude": r[0], "latitude": r[1], "tws": r[2]}
+                    for r in result if r[2] is not None
+                ])
+            
+            # Interpolate GRACE to well locations
+            if not grace_points.empty:
+                grace_interp = griddata(
+                    grace_points[['longitude', 'latitude']].values,
+                    grace_points['tws'].values,
+                    near_wells[['longitude', 'latitude']].values,
+                    method='linear'
+                )
+                grace_z = standardize_series(grace_interp)
+            else:
+                grace_z = pd.Series(np.zeros(len(near_wells)))
+        except Exception as e:
+            print(f"GRACE error in SASS: {e}")
+            grace_z = pd.Series(np.zeros(len(near_wells)))
+        
+        # Get rainfall data
+        try:
+            table_name = f"rf25_ind{year}_rfp25"
+            first_day, last_day = get_month_day_range(year, month)
+            
+            rainfall_values = []
+            with engine.connect() as conn:
+                for doy in range(first_day, last_day + 1):
+                    query = text(f"""
+                        SELECT 
+                            ST_X(ST_SetSRID((ST_PixelAsCentroids(rast, {doy})).geom, 4326)) as lon,
+                            ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, {doy})).geom, 4326)) as lat,
+                            (ST_PixelAsCentroids(rast, {doy})).val as val
+                        FROM {table_name} WHERE rid = 1
+                    """)
+                    result = conn.execute(query)
+                    rainfall_values.extend([
+                        {"longitude": r[0], "latitude": r[1], "val": r[2]}
+                        for r in result if r[2] is not None and 0 <= r[2] <= 500
+                    ])
+            
+            if rainfall_values:
+                rain_df = pd.DataFrame(rainfall_values)
+                rain_avg = rain_df.groupby(['longitude', 'latitude'])['val'].mean().reset_index()
+                
+                rain_interp = griddata(
+                    rain_avg[['longitude', 'latitude']].values,
+                    rain_avg['val'].values,
+                    near_wells[['longitude', 'latitude']].values,
+                    method='linear'
+                )
+                rain_z = standardize_series(rain_interp)
+            else:
+                rain_z = pd.Series(np.zeros(len(near_wells)))
+        except Exception as e:
+            print(f"Rainfall error in SASS: {e}")
+            rain_z = pd.Series(np.zeros(len(near_wells)))
+        
+        # Calculate SASS
+        sass = 0.5 * (-gwl_z.values) + 0.3 * grace_z.values + 0.2 * rain_z.values
+        
+        # Helper function to safely convert to float
+        def safe_float(value, default=0.0):
+            try:
+                f = float(value)
+                return default if (np.isnan(f) or np.isinf(f)) else f
+            except (ValueError, TypeError):
+                return default
+        
+        # Build results
+        results = []
+        for idx, row in near_wells.iterrows():
+            results.append({
+                "site_id": row['site_id'],
+                "latitude": row['latitude'],
+                "longitude": row['longitude'],
+                "sass_score": round(safe_float(sass[idx]), 3),
+                "gwl_stress": round(safe_float(-gwl_z.iloc[idx]), 3),
+                "grace_z": round(safe_float(grace_z.iloc[idx]), 3),
+                "rain_z": round(safe_float(rain_z.iloc[idx]), 3),
+                "gwl": round(safe_float(row['gwl']), 2)
+            })
+        
+        # Calculate statistics
+        sass_values = [r['sass_score'] for r in results]
+        
+        # ✅ CRITICAL: RETURN THE RESPONSE
+        return {
+            "module": "SASS",
+            "description": "Spatio-Temporal Aquifer Stress Score (composite index)",
+            "filters": {"state": state, "district": district, "year": year, "month": month},
+            "formula": "SASS = 0.5×(−z_GWL) + 0.3×z_GRACE + 0.2×z_Rain",
+            "statistics": {
+                "mean_sass": round(float(np.mean(sass_values)), 3) if sass_values else 0.0,
+                "max_sass": round(float(np.max(sass_values)), 3) if sass_values else 0.0,
+                "min_sass": round(float(np.min(sass_values)), 3) if sass_values else 0.0,
+                "stressed_sites": int(sum(1 for s in sass_values if s > 1.0))
+            },
+            "count": len(results),
+            "data": results
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"SASS Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"SASS calculation failed: {str(e)}")
+
+# =============================================================================
+# ADVANCED MODULE 4: GRACE vs GROUND DIVERGENCE
+# =============================================================================
+
+@app.get("/api/advanced/grace-divergence")
+def grace_divergence_analysis(
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    year: int = Query(..., ge=2002, le=2024),
+    month: int = Query(..., ge=1, le=12)
+):
+    """
+    Calculate divergence between GRACE satellite observations and ground well measurements
+    Returns: z_GRACE - z_GWL on a pixel grid
+    """
+    try:
+        # Helper function to safely convert to JSON-compliant float
+        def safe_float(value, default=0.0):
+            try:
+                f = float(value)
+                return default if (np.isnan(f) or np.isinf(f)) else f
+            except (ValueError, TypeError):
+                return default
+        
+        boundary_geojson = get_boundary_geojson(state, district)
+        target_date = datetime(year, month, 15)
+        
+        # Get GRACE pixels
+        band = grace_date_to_band(year, month)
+        query = text(f"""
+            SELECT 
+                ST_X(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as longitude,
+                ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as latitude,
+                (ST_PixelAsCentroids(rast, {band})).val as tws
+            FROM lwe_thickness_india WHERE rid = 1
+        """)
+        
+        with engine.connect() as conn:
+            result = conn.execute(query)
+            grace_df = pd.DataFrame([
+                {"longitude": r[0], "latitude": r[1], "tws": r[2]}
+                for r in result if r[2] is not None
+            ])
+        
+        if grace_df.empty:
+            raise HTTPException(status_code=404, detail="No GRACE data for this period")
+        
+        # Standardize GRACE
+        grace_z = standardize_series(grace_df['tws'].values)
+        grace_df['grace_z'] = grace_z
+        
+        # Get wells near target date
+        wells_df = get_wells_for_analysis(boundary_geojson)
+        tolerance = timedelta(days=60)
+        wells_df['date_diff'] = abs(wells_df['date'] - target_date)
+        near_wells = wells_df[wells_df['date_diff'] <= tolerance].sort_values('date_diff').groupby('site_id').first().reset_index()
+        
+        if near_wells.empty:
+            raise HTTPException(status_code=404, detail="No wells near target date")
+        
+        # Standardize wells
+        well_z = standardize_series(near_wells['gwl'].values)
+        
+        # Interpolate well z-scores to GRACE pixel locations
+        well_z_grid = griddata(
+            near_wells[['longitude', 'latitude']].values,
+            well_z.values,
+            grace_df[['longitude', 'latitude']].values,
+            method='linear'
+        )
+        
+        # Replace NaN from interpolation with 0
+        well_z_grid = np.nan_to_num(well_z_grid, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Calculate divergence
+        grace_df['well_z_interpolated'] = well_z_grid
+        grace_df['divergence'] = grace_df['grace_z'] - grace_df['well_z_interpolated']
+        
+        # Replace any NaN/Inf values in the DataFrame
+        grace_df = grace_df.replace([np.inf, -np.inf], np.nan).fillna(0)
+        
+        # Filter to boundary
+        if boundary_geojson:
+            prepared_boundary = get_boundary_geometry(state, district)
+            if prepared_boundary:
+                mask = grace_df.apply(
+                    lambda row: prepared_boundary.contains(Point(row['longitude'], row['latitude'])),
+                    axis=1
+                )
+                grace_df = grace_df[mask]
+        
+        # Ensure all values are JSON-compliant before creating results
+        results = []
+        for _, row in grace_df.iterrows():
+            results.append({
+                "latitude": safe_float(row['latitude']),
+                "longitude": safe_float(row['longitude']),
+                "divergence": round(safe_float(row['divergence']), 3),
+                "grace_z": round(safe_float(row['grace_z']), 3),
+                "well_z_interpolated": round(safe_float(row['well_z_interpolated']), 3),
+                "tws": round(safe_float(row['tws']), 3)
+            })
+        
+        return {
+            "module": "GRACE_DIVERGENCE",
+            "description": "Divergence between GRACE and ground measurements (positive = GRACE shows more water)",
+            "filters": {"state": state, "district": district, "year": year, "month": month},
+            "statistics": {
+                "mean_divergence": round(safe_float(grace_df['divergence'].mean()), 3),
+                "positive_divergence_pixels": int((grace_df['divergence'] > 0).sum()),
+                "negative_divergence_pixels": int((grace_df['divergence'] < 0).sum()),
+                "max_divergence": round(safe_float(grace_df['divergence'].max()), 3),
+                "min_divergence": round(safe_float(grace_df['divergence'].min()), 3)
+            },
+            "count": len(results),
+            "data": results
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Divergence Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+# =============================================================================
+# ADVANCED MODULE 5: GWL FORECASTING
+# =============================================================================
+@app.get("/api/advanced/forecast")
+def gwl_forecast_with_grace(
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    forecast_months: int = Query(12, ge=1, le=24),
+    k_neighbors: int = Query(8, ge=3, le=20),
+    grid_resolution: int = Query(50, ge=20, le=100)
+):
+    """
+    GWL Forecasting using Wells + GRACE (matches Dash implementation)
+    
+    Method:
+    1. Build monthly site matrix from wells
+    2. For each grid cell, compute neighbor-weighted composite GWL series
+    3. Deseasonalize GWL (extract trend+residual)
+    4. Extract colocated GRACE series and deseasonalize
+    5. OLS regression: y = a + b*t + c*gz
+    6. Forecast future trend + add back GWL seasonality
+    7. Return Δ12m (change from last observed to 12 months ahead)
+    """
+    try:
+        print(f"\n🔮 Starting forecast: state={state}, district={district}")
+        
+        # Get boundary
+        boundary_geojson = get_boundary_geojson(state, district)
+        if not boundary_geojson:
+            raise HTTPException(status_code=404, detail="Boundary not found")
+
+        # Parse bounds
+        boundary_geo = json.loads(boundary_geojson)
+        geom = shape(boundary_geo)
+        minx, miny, maxx, maxy = geom.bounds
+        
+        print(f"  📍 Bounds: [{minx:.3f}, {miny:.3f}, {maxx:.3f}, {maxy:.3f}]")
+        
+        # Prepare boundary for point filtering
+        prepared_boundary = prep(geom)
+
+        # ---------------------------
+        # 1. Load all wells
+        # ---------------------------
+        print("  📊 Loading wells data...")
+        wells_df = get_wells_for_analysis(boundary_geojson)
+        if wells_df.empty:
+            raise HTTPException(status_code=404, detail="No well data")
+
+        print(f"  ✓ Found {len(wells_df)} well observations")
+
+        # Build monthly matrix (date x site_id)
+        wells_df['date'] = pd.to_datetime(wells_df['date'])
+        pivot = wells_df.pivot_table(
+            index='date', 
+            columns='site_id', 
+            values='gwl', 
+            aggfunc='mean'
+        )
+        
+        # Resample to monthly start
+        pivot = pivot.resample('MS').mean()
+        
+        print(f"  ✓ Built matrix: {len(pivot)} months × {len(pivot.columns)} sites")
+        
+        if len(pivot) < 24:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Need at least 24 months of data, found {len(pivot)}"
+            )
+
+        # ---------------------------
+        # 2. Create grid
+        # ---------------------------
+        print(f"  🗺️  Creating {grid_resolution}×{grid_resolution} grid...")
+        xs = np.linspace(minx, maxx, grid_resolution)
+        ys = np.linspace(miny, maxy, grid_resolution)
+        GX, GY = np.meshgrid(xs, ys)
+        
+        grid_lons = GX.ravel()
+        grid_lats = GY.ravel()
+        
+        # Filter grid points to AOI
+        inside_mask = np.array([
+            prepared_boundary.contains(Point(lon, lat)) or 
+            prepared_boundary.touches(Point(lon, lat))
+            for lon, lat in zip(grid_lons, grid_lats)
+        ])
+        
+        grid_lons = grid_lons[inside_mask]
+        grid_lats = grid_lats[inside_mask]
+        
+        print(f"  ✓ Grid points inside AOI: {len(grid_lons)}")
+        
+        if len(grid_lons) == 0:
+            raise HTTPException(status_code=404, detail="No grid points inside AOI")
+
+        # ---------------------------
+        # 3. Get unique site locations
+        # ---------------------------
+        site_locs = wells_df.groupby('site_id')[['latitude', 'longitude']].first()
+        site_ids = site_locs.index.values
+        site_coords = site_locs[['latitude', 'longitude']].values  # [lat, lon]
+        site_coords_rad = np.radians(site_coords)
+        
+        # Align pivot columns with site_ids
+        pivot = pivot.reindex(columns=site_ids)
+
+        # ---------------------------
+        # 4. Build KNN model for wells
+        # ---------------------------
+        print(f"  🎯 Building KNN model (k={k_neighbors})...")
+        nbrs = NearestNeighbors(
+            n_neighbors=min(k_neighbors, len(site_ids)),
+            metric='haversine'
+        ).fit(site_coords_rad)
+        
+        grid_coords = np.column_stack([grid_lats, grid_lons])  # [lat, lon]
+        grid_coords_rad = np.radians(grid_coords)
+        
+        dists, idx = nbrs.kneighbors(grid_coords_rad)
+        dists_km = dists * 6371.0  # Convert to km
+
+        # ---------------------------
+        # 5. Pre-load GRACE for all grid points
+        # ---------------------------
+        print(f"  🛰️  Loading GRACE data...")
+        
+        # Get all available GRACE months
+        grace_times = []
+        grace_data_list = []
+        
+        for (year, month), band in sorted(GRACE_BAND_MAPPING.items()):
+            try:
+                query = text(f"""
+                    SELECT
+                        ST_X(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as lon,
+                        ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as lat,
+                        (ST_PixelAsCentroids(rast, {band})).val as tws
+                    FROM lwe_thickness_india
+                    WHERE rid = 1
+                """)
+                
+                with engine.connect() as conn:
+                    result = conn.execute(query)
+                    grace_pixels = pd.DataFrame([
+                        {"lon": r[0], "lat": r[1], "tws": r[2]}
+                        for r in result if r[2] is not None
+                    ])
+                
+                if not grace_pixels.empty:
+                    # Interpolate to grid points for this month
+                    tws_interp = griddata(
+                        grace_pixels[['lon', 'lat']].values,
+                        grace_pixels['tws'].values,
+                        np.column_stack([grid_lons, grid_lats]),
+                        method='linear'
+                    )
+                    
+                    grace_times.append(datetime(year, month, 1))
+                    grace_data_list.append(tws_interp)
+            
+            except Exception as e:
+                continue
+        
+        if not grace_data_list:
+            print("  ⚠️  No GRACE data available, proceeding without GRACE")
+            grace_available = False
+        else:
+            # Create GRACE DataFrame: index=time, columns=grid_point_index
+            grace_df = pd.DataFrame(
+                np.column_stack(grace_data_list).T,  # Transpose to [n_points, n_times]
+                index=pd.DatetimeIndex(grace_times),
+                columns=range(len(grid_lons))
+            )
+            grace_df = grace_df.resample('MS').mean()  # Ensure monthly
+            grace_available = True
+            print(f"  ✓ GRACE loaded: {len(grace_times)} months")
+
+        # ---------------------------
+        # 6. Forecast for each grid point
+        # ---------------------------
+        print(f"  🔮 Forecasting for {len(grid_lons)} grid points...")
+        
+        results = []
+        successful = 0
+        
+        for q in range(len(grid_lons)):
+            try:
+                # Get neighbor indices and weights
+                neighbor_idx = idx[q]
+                neighbor_dist_km = dists_km[q]
+                
+                # IDW weights
+                weights = 1.0 / (neighbor_dist_km + 1e-6)
+                weights = weights / weights.sum()
+                
+                # Compute weighted GWL series
+                neighbor_cols = pivot.columns[neighbor_idx]
+                gwl_series = (pivot[neighbor_cols] * weights).sum(axis=1).dropna()
+                
+                if len(gwl_series) < 24:
+                    continue
+                
+                # ---------------------------
+                # Deseasonalize GWL
+                # ---------------------------
+                gwl_clim = gwl_series.groupby(gwl_series.index.month).mean()
+                gwl_clim = gwl_clim.reindex(range(1, 13)).interpolate().bfill().ffill()
+                gwl_season = gwl_series.index.month.map(gwl_clim.to_dict())
+                gwl_ds = (gwl_series - gwl_season).dropna()
+                
+                if len(gwl_ds) < 18:
+                    continue
+                
+                # ---------------------------
+                # Get colocated GRACE and deseasonalize
+                # ---------------------------
+                if grace_available and q in grace_df.columns:
+                    grace_series = grace_df[q].dropna()
+                    
+                    if len(grace_series) >= 12:
+                        # Align to monthly start
+                        grace_series.index = grace_series.index.to_period('M').to_timestamp()
+                        grace_series = grace_series.groupby(grace_series.index).mean()
+                        
+                        # Deseasonalize GRACE
+                        grace_clim = grace_series.groupby(grace_series.index.month).mean()
+                        grace_clim = grace_clim.reindex(range(1, 13)).interpolate().bfill().ffill()
+                        grace_season = grace_series.index.month.map(grace_clim.to_dict())
+                        grace_ds = (grace_series - grace_season).dropna()
+                    else:
+                        grace_ds = pd.Series(index=gwl_ds.index, data=0.0)
+                        grace_clim = pd.Series({m: 0.0 for m in range(1, 13)})
+                else:
+                    grace_ds = pd.Series(index=gwl_ds.index, data=0.0)
+                    grace_clim = pd.Series({m: 0.0 for m in range(1, 13)})
+                
+                # ---------------------------
+                # OLS: y = a + b*t + c*gz
+                # ---------------------------
+                joined = pd.concat([
+                    gwl_ds.rename('y'),
+                    grace_ds.rename('gz')
+                ], axis=1).dropna()
+                
+                if len(joined) < 18:
+                    continue
+                
+                t0 = joined.index.min()
+                joined['t'] = (joined.index - t0).days.values
+                
+                # Build design matrix
+                X = np.column_stack([
+                    np.ones(len(joined)),
+                    joined['t'].values,
+                    joined['gz'].values
+                ])
+                y = joined['y'].values
+                
+                try:
+                    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+                except Exception:
+                    continue
+                
+                a, b, c = beta
+                
+                # ---------------------------
+                # Forecast
+                # ---------------------------
+                last_time = gwl_series.index.max()
+                future_index = pd.date_range(
+                    last_time + pd.offsets.MonthBegin(1),
+                    periods=forecast_months,
+                    freq='MS'
+                )
+                
+                t_future = (future_index - t0).days.values
+                
+                # Use GRACE climatology for future (stationary assumption)
+                gz_future = np.array([grace_clim.get(m, 0.0) for m in future_index.month])
+                
+                # Predict deseasonalized values
+                y_future_ds = a + b * t_future + c * gz_future
+                
+                # Add back GWL seasonality
+                gwl_season_future = np.array([gwl_clim.get(m, 0.0) for m in future_index.month])
+                y_future = y_future_ds + gwl_season_future
+                
+                # Calculate change from last observed to end of forecast
+                last_gwl = gwl_series.iloc[-1]
+                final_gwl = y_future[-1]
+                delta_forecast = final_gwl - last_gwl
+                
+                # Calculate R²
+                y_pred = X @ beta
+                ss_res = np.sum((y - y_pred) ** 2)
+                ss_tot = np.sum((y - np.mean(y)) ** 2)
+                r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+                
+                results.append({
+                    "longitude": float(grid_lons[q]),
+                    "latitude": float(grid_lats[q]),
+                    "pred_delta_m": round(float(delta_forecast), 3),
+                    "current_gwl": round(float(last_gwl), 2),
+                    "forecast_gwl": round(float(final_gwl), 2),
+                    "r_squared": round(float(r_squared), 3),
+                    "trend_component": round(float(b * t_future[-1]), 3),
+                    "grace_component": round(float(c * gz_future[-1]), 3) if grace_available else 0.0,
+                    "n_months_training": len(joined)
+                })
+                
+                successful += 1
+                
+                if successful % 100 == 0:
+                    print(f"    ✓ Processed {successful}/{len(grid_lons)} points")
+            
+            except Exception as e:
+                if successful < 3:  # Only log first few errors
+                    print(f"    ⚠️  Grid point {q} error: {str(e)[:100]}")
+                continue
+        
+        print(f"  ✅ Forecast complete: {successful}/{len(grid_lons)} cells successful")
+        
+        if not results:
+            raise HTTPException(
+                status_code=500,
+                detail="Forecast failed for all grid points - check well data quality"
+            )
+        
+        results_df = pd.DataFrame(results)
+        
+        return {
+            "module": "FORECAST_GWL_GRACE",
+            "description": f"GWL forecast ({forecast_months}-month) using deseasonalized trend + GRACE",
+            "method": "OLS with y = a + b*t + c*GRACE_anomaly, then add back GWL seasonality",
+            "filters": {"state": state, "district": district},
+            "parameters": {
+                "forecast_months": forecast_months,
+                "k_neighbors": k_neighbors,
+                "grid_resolution": grid_resolution,
+                "grace_used": grace_available
+            },
+            "statistics": {
+                "mean_change_m": round(float(results_df['pred_delta_m'].mean()), 3),
+                "median_change_m": round(float(results_df['pred_delta_m'].median()), 3),
+                "declining_cells": int((results_df['pred_delta_m'] > 0).sum()),
+                "recovering_cells": int((results_df['pred_delta_m'] < 0).sum()),
+                "mean_r_squared": round(float(results_df['r_squared'].mean()), 3),
+                "success_rate": round(successful / len(grid_lons) * 100, 1)
+            },
+            "count": len(results),
+            "data": results_df.to_dict("records")
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Forecast error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# =============================================================================
+# ADVANCED MODULE 6: RECHARGE STRUCTURE RECOMMENDATION
+# =============================================================================
+
+@app.get("/api/advanced/recharge-planning")
+def recharge_planning(
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    year: Optional[int] = Query(None, ge=1994, le=2024),
+    month: Optional[int] = Query(None, ge=1, le=12)
+):
+    """
+    Calculate MAR (Managed Aquifer Recharge) potential and recommend structure types
+    """
+    try:
+        boundary_geojson = get_boundary_geojson(state, district)
+        
+        # Get aquifer properties
+        aquifers_df = get_aquifer_properties(boundary_geojson)
+        if aquifers_df.empty:
+            raise HTTPException(status_code=404, detail="No aquifer data")
+        
+        total_area_m2 = aquifers_df['area_m2'].sum()
+        total_area_km2 = total_area_m2 / 1_000_000
+        
+        # Determine dominant lithology using mode (most common value)
+        dominant_lithology = 'alluvium'
+        if not aquifers_df.empty and 'majoraquif' in aquifers_df.columns:
+            lithology_series = aquifers_df['majoraquif'].astype(str).str.lower()
+            mode_values = lithology_series.mode()
+            if len(mode_values) > 0:
+                dominant_lithology = mode_values.iloc[0]
+                # Extract key lithology type
+                if 'alluvium' in dominant_lithology:
+                    dominant_lithology = 'alluvium'
+                elif 'sandstone' in dominant_lithology:
+                    dominant_lithology = 'sandstone'
+                elif 'limestone' in dominant_lithology:
+                    dominant_lithology = 'limestone'
+                elif 'basalt' in dominant_lithology:
+                    dominant_lithology = 'basalt'
+                elif 'granite' in dominant_lithology:
+                    dominant_lithology = 'granite'
+                else:
+                    dominant_lithology = 'alluvium'
+        
+        # Runoff coefficients by lithology (matching Dash: C_map)
+        runoff_coeff_map = {
+            'alluvium': 0.35,
+            'sandstone': 0.30,
+            'limestone': 0.28,
+            'basalt': 0.25,
+            'granite': 0.20
+        }
+        runoff_coeff = runoff_coeff_map.get(dominant_lithology, 0.25)
+        
+        # Get monsoon rainfall (matching Dash implementation)
+        rainfall_m = 0.3  # Default 300mm monsoon
+        if year and year in RAINFALL_TABLES:
+            use_year = year
+        else:
+            use_year = max(RAINFALL_TABLES.keys()) if RAINFALL_TABLES else 2023
+        
+        try:
+            table_name = f"rf25_ind{use_year}_rfp25"
+            monsoon_months = [6, 7, 8, 9]  # June-September
+            
+            total_rainfall_mm = 0
+            days_count = 0
+            
+            with engine.connect() as conn:
+                for month_num in monsoon_months:
+                    first_day, last_day = get_month_day_range(use_year, month_num)
+                    
+                    for doy in range(first_day, last_day + 1):
+                        query = text(f"""
+                            SELECT AVG((ST_PixelAsCentroids(rast, {doy})).val) as avg_val
+                            FROM {table_name}
+                            WHERE rid = 1
+                        """)
+                        result = conn.execute(query).fetchone()
+                        if result[0]:
+                            total_rainfall_mm += float(result[0])
+                            days_count += 1
+            
+            # Calculate average and convert to meters
+            if days_count > 0:
+                rainfall_m = (total_rainfall_mm / days_count) / 1000.0
+        except Exception:
+            rainfall_m = 0.3  # Default 300mm monsoon
+        
+        # Calculate potential recharge (matching Dash formula exactly)
+        capture_fraction = 0.15  # 15% capture efficiency (f_capture)
+        potential_recharge_mcm = (total_area_m2 / 1_000_000) * rainfall_m * runoff_coeff * capture_fraction
+        
+        # Structure recommendations (matching Dash: struct_cap_m3 and allocation)
+        struct_cap_m3 = {
+            'Percolation tank': 50000,
+            'Check dam': 30000,
+            'Recharge shaft': 500,
+            'Farm pond': 1000,
+            'Gabion': 2500
+        }
+        
+        # Structure mix and allocation fractions (matching Dash exactly)
+        mix = ['Percolation tank', 'Check dam', 'Recharge shaft', 'Farm pond', 'Gabion']
+        alloc_frac = [0.3, 0.3, 0.2, 0.15, 0.05]
+        
+        structure_plan = []
+        for sname, frac in zip(mix, alloc_frac):
+            vol_req_m3 = potential_recharge_mcm * 1_000_000 * frac
+            n_units = max(1, int(vol_req_m3 / struct_cap_m3[sname])) if struct_cap_m3[sname] > 0 else 0
+            
+            structure_plan.append({
+                "structure_type": sname,
+                "recommended_units": n_units,
+                "total_capacity_mcm": round(n_units * struct_cap_m3[sname] / 1_000_000, 3),
+                "allocation_fraction": frac
+            })
+        
+        # Site-specific recommendations based on stress (matching Dash logic)
+        wells_df = get_wells_for_analysis(boundary_geojson)
+        site_recommendations = []
+        
+        if not wells_df.empty and year and month:
+            # Match Dash: target_date and tolerance
+            target_date = pd.to_datetime(f"{year}-{month:02d}-15")
+            tolerance = pd.Timedelta(days=60)
+            
+            wells_df = wells_df.copy()
+            wells_df['dt_diff'] = (wells_df['date'] - target_date).abs()
+            
+            # Filter wells within tolerance and get closest reading per site
+            near_wells = wells_df[wells_df['dt_diff'] <= tolerance].sort_values('dt_diff').groupby('site_id').head(1)
+            
+            if not near_wells.empty:
+                # Calculate stress using negative z-score (matching Dash: -zscore_series)
+                gwl_values = near_wells['gwl'].values
+                gwl_mean = gwl_values.mean()
+                gwl_std = gwl_values.std()
+                
+                if gwl_std > 0:
+                    stress = -(gwl_values - gwl_mean) / gwl_std
+                else:
+                    stress = np.zeros_like(gwl_values)
+                
+                # Categorize stress (matching Dash bins exactly)
+                stress_categories = pd.cut(
+                    stress,
+                    bins=[-np.inf, -0.5, 0, 0.5, np.inf],
+                    labels=['Critical', 'Stressed', 'Moderate', 'Healthy']
+                )
+                
+                # Recommendation map (matching Dash: rec_map)
+                rec_map = {
+                    'Critical': 'Recharge shaft',
+                    'Stressed': 'Check dam',
+                    'Moderate': 'Farm pond',
+                    'Healthy': 'Percolation tank'
+                }
+                
+                for idx, (_, row) in enumerate(near_wells.iterrows()):
+                    category = str(stress_categories[idx])
+                    site_recommendations.append({
+                        "site_id": row['site_id'],
+                        "latitude": row['latitude'],
+                        "longitude": row['longitude'],
+                        "stress_category": category,
+                        "recommended_structure": rec_map.get(category, 'Percolation tank'),
+                        "current_gwl": round(row['gwl'], 2)
+                    })
+        
+        return {
+            "module": "RECHARGE_PLANNING",
+            "description": "MAR potential and structure recommendations",
+            "filters": {"state": state, "district": district, "year": year, "month": month},
+            "analysis_parameters": {
+                "area_km2": round(total_area_km2, 2),
+                "dominant_lithology": dominant_lithology,
+                "runoff_coefficient": runoff_coeff,
+                "monsoon_rainfall_m": round(rainfall_m, 3),
+                "capture_fraction": capture_fraction,
+                "year_analyzed": use_year
+            },
+            "potential": {
+                "total_recharge_potential_mcm": round(potential_recharge_mcm, 2),
+                "per_km2_mcm": round(potential_recharge_mcm / total_area_km2, 4) if total_area_km2 > 0 else 0
+            },
+            "structure_plan": structure_plan,
+            "site_recommendations": site_recommendations[:100],  # Limit to 100 sites
+            "count": len(site_recommendations)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Recharge Planning Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# =============================================================================
+# ADVANCED MODULE 7: SIGNIFICANT TRENDS
+# =============================================================================
+
+@app.get("/api/advanced/significant-trends")
+def significant_trends(
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    p_threshold: float = Query(0.1, ge=0.01, le=0.2)
+):
+    """
+    Identify sites with statistically significant trends (Mann-Kendall or OLS)
+    """
+    try:
+        boundary_geojson = get_boundary_geojson(state, district)
+        wells_df = get_wells_for_analysis(boundary_geojson)
+        
+        if wells_df.empty:
+            raise HTTPException(status_code=404, detail="No well data")
+        
+        significant_sites = []
+        
+        for site_id, group in wells_df.groupby('site_id'):
+            if len(group) < 12:
+                continue
+            
+            group = group.sort_values('date')
+            series = group.set_index('date')['gwl'].resample('MS').mean().dropna()
+            
+            if len(series) < 12:
+                continue
+            
+            # Try Mann-Kendall if available
+            if MK_AVAILABLE:
+                try:
+                    result = mk.original_test(series.values)
+                    slope = result.slope
+                    p_value = result.p
+                except:
+                    # Fallback to OLS
+                    x = np.arange(len(series))
+                    slope, _, _, p_value, _ = linregress(x, series.values)
+                    slope = slope * 12  # Convert to annual
+            else:
+                # OLS only
+                x = np.arange(len(series))
+                slope, _, _, p_value, _ = linregress(x, series.values)
+                slope = slope * 12  # Convert to annual
+            
+            if p_value < p_threshold:
+                significant_sites.append({
+                    "site_id": site_id,
+                    "latitude": group['latitude'].iloc[0],
+                    "longitude": group['longitude'].iloc[0],
+                    "slope_m_per_year": round(float(slope), 4),
+                    "p_value": round(float(p_value), 4),
+                    "trend_direction": "declining" if slope > 0 else "recovering",
+                    "significance_level": "high" if p_value < 0.01 else ("medium" if p_value < 0.05 else "low"),
+                    "n_months": len(series),
+                    "date_range": f"{series.index.min().date()} to {series.index.max().date()}"
+                })
+        
+        if not significant_sites:
+            return {
+                "module": "SIGNIFICANT_TRENDS",
+                "description": f"No sites with significant trends (p < {p_threshold})",
+                "filters": {"state": state, "district": district},
+                "parameters": {"p_threshold": p_threshold},
+                "count": 0,
+                "data": []
+            }
+        
+        sites_df = pd.DataFrame(significant_sites)
+        
+        return {
+            "module": "SIGNIFICANT_TRENDS",
+            "description": f"Sites with statistically significant trends (p < {p_threshold})",
+            "filters": {"state": state, "district": district},
+            "parameters": {
+                "p_threshold": p_threshold,
+                "method": "Mann-Kendall" if MK_AVAILABLE else "OLS"
+            },
+            "statistics": {
+                "total_significant": len(significant_sites),
+                "declining": int((sites_df['slope_m_per_year'] > 0).sum()),
+                "recovering": int((sites_df['slope_m_per_year'] < 0).sum()),
+                "mean_slope": round(float(sites_df['slope_m_per_year'].mean()), 4),
+                "high_significance": int((sites_df['p_value'] < 0.01).sum())
+            },
+            "count": len(significant_sites),
+            "data": significant_sites
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Significant Trends Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# =============================================================================
+# ADVANCED MODULE 8: CHANGEPOINT DETECTION
+# =============================================================================
+
+@app.get("/api/advanced/changepoints")
+def changepoint_detection(
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    penalty: float = Query(5.0, ge=1.0, le=20.0)
+):
+    """
+    Detect structural breaks in GWL time series using PELT algorithm
+    """
+    if not RUPTURES_AVAILABLE:
+        raise HTTPException(
+            status_code=501,
+            detail="Changepoint detection requires 'ruptures' package. Install with: pip install ruptures"
+        )
+    
+    try:
+        boundary_geojson = get_boundary_geojson(state, district)
+        wells_df = get_wells_for_analysis(boundary_geojson)
+        
+        if wells_df.empty:
+            raise HTTPException(status_code=404, detail="No well data")
+        
+        changepoint_sites = []
+        coverage_sites = []
+        
+        for site_id, group in wells_df.groupby('site_id'):
+            group = group.sort_values('date')
+            series = group.set_index('date')['gwl'].resample('MS').mean().interpolate().dropna()
+            
+            # Coverage info
+            if len(series) > 0:
+                coverage_sites.append({
+                    "site_id": site_id,
+                    "latitude": group['latitude'].iloc[0],
+                    "longitude": group['longitude'].iloc[0],
+                    "n_months": len(series),
+                    "date_start": series.index.min().date().isoformat(),
+                    "date_end": series.index.max().date().isoformat(),
+                    "span_years": round((series.index.max() - series.index.min()).days / 365.25, 1)
+                })
+            
+            if len(series) < 24:
+                continue
+            
+            # Detect changepoints
+            try:
+                algo = rpt.Pelt(model="l2").fit(series.values)
+                breakpoints = algo.predict(pen=penalty)
+                
+                if len(breakpoints) > 1:  # Has at least one changepoint
+                    first_bp_idx = breakpoints[0]
+                    if first_bp_idx < len(series):
+                        first_bp_date = series.index[min(first_bp_idx, len(series) - 1)]
+                        
+                        changepoint_sites.append({
+                            "site_id": site_id,
+                            "latitude": group['latitude'].iloc[0],
+                            "longitude": group['longitude'].iloc[0],
+                            "changepoint_date": first_bp_date.date().isoformat(),
+                            "changepoint_year": first_bp_date.year,
+                            "changepoint_month": first_bp_date.month,
+                            "n_breakpoints": len(breakpoints) - 1,
+                            "all_breakpoints": [series.index[min(bp, len(series)-1)].date().isoformat() 
+                                              for bp in breakpoints[:-1]],
+                            "series_length": len(series)
+                        })
+            except Exception as e:
+                print(f"Changepoint detection failed for {site_id}: {e}")
+                continue
+        
+        return {
+            "module": "CHANGEPOINTS",
+            "description": "Structural break detection using PELT algorithm",
+            "filters": {"state": state, "district": district},
+            "parameters": {
+                "penalty": penalty,
+                "algorithm": "PELT",
+                "model": "l2 (mean shift detection)"
+            },
+            "statistics": {
+                "total_sites_analyzed": len(coverage_sites),
+                "sites_with_changepoints": len(changepoint_sites),
+                "detection_rate": round(len(changepoint_sites) / len(coverage_sites) * 100, 1) if coverage_sites else 0,
+                "avg_series_length": round(np.mean([s['n_months'] for s in coverage_sites]), 1) if coverage_sites else 0
+            },
+            "changepoints": {
+                "count": len(changepoint_sites),
+                "data": changepoint_sites
+            },
+            "coverage": {
+                "count": len(coverage_sites),
+                "data": coverage_sites[:100]  # Limit for performance
+            }
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Changepoint Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# =============================================================================
+# ADVANCED MODULE 9: LAG CORRELATION (Rainfall -> GWL)
+# =============================================================================
+
+@app.get("/api/advanced/lag-correlation")
+def rainfall_gwl_lag_correlation(
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    max_lag_months: int = Query(12, ge=1, le=24)
+):
+    """
+    Find optimal lag between rainfall and GWL response for each site
+    
+    OPTIMIZATIONS APPLIED:
+    1. Query rainfall ONCE (not per site)
+    2. Pre-filter wells by minimum observations
+    3. Vectorized date operations
+    4. Early termination for invalid data
+    """
+    try:
+        start_time = time.time()
+        
+        # Get boundary
+        boundary_geojson = get_boundary_geojson(state, district)
+        
+        # ✅ OPTIMIZATION 1: Query rainfall ONCE for all sites (not inside loop!)
+        rainfall_monthly = query_rainfall_monthly(boundary_geojson)
+        if rainfall_monthly.empty:
+            raise HTTPException(status_code=404, detail="No rainfall data")
+        
+        rainfall_series = rainfall_monthly.set_index('period')['avg_rainfall'].sort_index()
+        print(f"Rainfall loaded: {time.time() - start_time:.2f}s")
+        
+        # Get wells data with filtering in SQL
+        wells_df = get_wells_for_analysis(boundary_geojson)
+        if wells_df.empty:
+            raise HTTPException(status_code=404, detail="No well data")
+        
+        print(f"Wells loaded: {time.time() - start_time:.2f}s, count: {len(wells_df)}")
+        
+        # ✅ OPTIMIZATION 2: Pre-filter by site observation count
+        site_counts = wells_df.groupby('site_id').size()
+        valid_sites = site_counts[site_counts >= 18].index
+        wells_df = wells_df[wells_df['site_id'].isin(valid_sites)]
+        
+        if wells_df.empty:
+            raise HTTPException(status_code=404, detail="No sites with sufficient data (min 18 observations)")
+        
+        print(f"After filtering: {len(valid_sites)} sites with ≥18 observations")
+        
+        # ✅ OPTIMIZATION 3: Vectorized date operations
+        wells_df['date'] = pd.to_datetime(wells_df['date'])
+        wells_df = wells_df.sort_values(['site_id', 'date'])
+        
+        lag_results = []
+        sites_processed = 0
+        sites_skipped = 0
+        
+        for site_id, group in wells_df.groupby('site_id'):
+            # Resample to monthly
+            gwl_series = group.set_index('date')['gwl'].resample('MS').mean().dropna()
+            
+            # Check minimum length after resampling
+            if len(gwl_series) < 18:
+                sites_skipped += 1
+                continue
+            
+            # Find overlap with rainfall
+            combined = pd.concat([
+                gwl_series.rename('gwl'), 
+                rainfall_series.rename('rain')
+            ], axis=1).dropna()
+            
+            # Check minimum overlap
+            if len(combined) < 18:
+                sites_skipped += 1
+                continue
+            
+            # Test different lags
+            best_lag = 0
+            best_corr = 0.0
+            
+            for lag in range(0, max_lag_months + 1):
+                try:
+                    # Shift rainfall forward by lag months
+                    corr = combined['gwl'].corr(combined['rain'].shift(lag))
+                    
+                    # Check for valid correlation and if it's better
+                    if pd.notna(corr) and abs(corr) > abs(best_corr):
+                        best_corr = corr
+                        best_lag = lag
+                except Exception:
+                    continue
+            
+            # Only include sites with meaningful correlation
+            if abs(best_corr) > 0.0:  # Can also use threshold like 0.1
+                lag_results.append({
+                    "site_id": site_id,
+                    "latitude": float(group['latitude'].iloc[0]),
+                    "longitude": float(group['longitude'].iloc[0]),
+                    "best_lag_months": int(best_lag),
+                    "correlation": round(float(best_corr), 3),
+                    "abs_correlation": round(abs(float(best_corr)), 3),
+                    "relationship": "positive" if best_corr > 0 else "negative",
+                    "n_months_analyzed": int(len(combined))
+                })
+                sites_processed += 1
+        
+        print(f"Processing complete: {sites_processed} sites analyzed, {sites_skipped} skipped")
+        print(f"Total time: {time.time() - start_time:.2f}s")
+        
+        if not lag_results:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Insufficient data for lag analysis. Processed {len(valid_sites)} sites, none had sufficient overlap with rainfall data."
+            )
+        
+        # Create DataFrame for statistics
+        results_df = pd.DataFrame(lag_results)
+        
+        # Calculate statistics
+        lag_distribution = results_df['best_lag_months'].value_counts().sort_index().to_dict()
+        
+        return {
+            "module": "LAG_CORRELATION",
+            "description": f"Rainfall to GWL response lag analysis (0-{max_lag_months} months)",
+            "filters": {
+                "state": state, 
+                "district": district
+            },
+            "parameters": {
+                "max_lag_months": max_lag_months,
+                "min_months_required": 18
+            },
+            "statistics": {
+                "total_sites": len(lag_results),
+                "sites_processed": sites_processed,
+                "sites_skipped": sites_skipped,
+                "mean_lag": round(float(results_df['best_lag_months'].mean()), 1),
+                "median_lag": int(results_df['best_lag_months'].median()),
+                "mean_abs_correlation": round(float(results_df['abs_correlation'].mean()), 3),
+                "max_correlation": round(float(results_df['abs_correlation'].max()), 3),
+                "min_correlation": round(float(results_df['abs_correlation'].min()), 3),
+                "lag_distribution": lag_distribution
+            },
+            "count": len(lag_results),
+            "data": lag_results[:100]  # Limit to 100 for performance, add pagination if needed
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Lag Correlation Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+# =============================================================================
+# ADVANCED MODULE 10: HOTSPOT CLUSTERING
+# =============================================================================
+
+@app.get("/api/advanced/hotspots")
+def decline_hotspot_clustering(
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    eps_km: Optional[float] = Query(None, ge=5.0, le=100.0),
+    min_samples: int = Query(5, ge=2, le=50)
+):
+    """
+    Identify spatially clustered declining well sites using DBSCAN
+    """
+    try:
+        boundary_geojson = get_boundary_geojson(state, district)
+        wells_df = get_wells_for_analysis(boundary_geojson)
+        
+        if wells_df.empty:
+            raise HTTPException(status_code=404, detail="No well data")
+        
+        # Calculate slopes for each site
+        site_slopes = []
+        for site_id, group in wells_df.groupby('site_id'):
+            if len(group) < 6:
+                continue
+            
+            group = group.sort_values('date')
+            days = (group['date'] - group['date'].min()).dt.days.values
+            gwl = group['gwl'].values
+            
+            if len(np.unique(days)) < 2:
+                continue
+            
+            slope, _, _, _, _ = linregress(days, gwl)
+            
+            site_slopes.append({
+                'site_id': site_id,
+                'latitude': group['latitude'].iloc[0],
+                'longitude': group['longitude'].iloc[0],
+                'slope_m_per_year': slope * 365.25
+            })
+        
+        if not site_slopes:
+            raise HTTPException(status_code=404, detail="Insufficient data for clustering")
+        
+        slopes_df = pd.DataFrame(site_slopes)
+        
+        # Filter to declining sites only (positive slope = deeper = decline)
+        declining = slopes_df[slopes_df['slope_m_per_year'] > 0].copy()
+        
+        if len(declining) < min_samples:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Only {len(declining)} declining sites found, need at least {min_samples}"
+            )
+        
+        # Auto-determine eps if not provided
+        if eps_km is None:
+            # Base eps on AOI size
+            coords = declining[['latitude', 'longitude']].values
+            lat_range = coords[:, 0].max() - coords[:, 0].min()
+            lon_range = coords[:, 1].max() - coords[:, 1].min()
+            diagonal_deg = np.sqrt(lat_range**2 + lon_range**2)
+            eps_km = np.clip(0.05 * diagonal_deg * 111, 5, 50)  # 5% of diagonal, 5-50km range
+        
+        # DBSCAN clustering
+        coords_rad = np.radians(declining[['latitude', 'longitude']].values)
+        R_earth = 6371.0
+        eps_rad = eps_km / R_earth
+        
+        clustering = DBSCAN(eps=eps_rad, min_samples=min_samples, metric='haversine').fit(coords_rad)
+        declining['cluster'] = clustering.labels_
+        
+        # Statistics per cluster
+        cluster_stats = []
+        for cluster_id in sorted(declining['cluster'].unique()):
+            if cluster_id == -1:  # Noise
+                continue
+            
+            cluster_sites = declining[declining['cluster'] == cluster_id]
+            
+            cluster_stats.append({
+                "cluster_id": int(cluster_id),
+                "n_sites": len(cluster_sites),
+                "mean_slope": round(float(cluster_sites['slope_m_per_year'].mean()), 4),
+                "max_slope": round(float(cluster_sites['slope_m_per_year'].max()), 4),
+                "centroid_lat": round(float(cluster_sites['latitude'].mean()), 6),
+                "centroid_lon": round(float(cluster_sites['longitude'].mean()), 6)
+            })
+        
+        # Convert results
+        results = declining.to_dict('records')
+        
+        return {
+            "module": "HOTSPOTS",
+            "description": "Spatial clustering of declining well sites",
+            "filters": {"state": state, "district": district},
+            "parameters": {
+                "eps_km": round(eps_km, 2),
+                "min_samples": min_samples,
+                "algorithm": "DBSCAN",
+                "metric": "haversine"
+            },
+            "statistics": {
+                "total_declining_sites": len(declining),
+                "n_clusters": len(cluster_stats),
+                "noise_points": int((declining['cluster'] == -1).sum()),
+                "clustered_points": int((declining['cluster'] != -1).sum()),
+                "clustering_rate": round(int((declining['cluster'] != -1).sum()) / len(declining) * 100, 1)
+            },
+            "clusters": cluster_stats,
+            "count": len(results),
+            "data": results
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Hotspot Clustering Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# ADVANCED MODULES INDEX ENDPOINT
+# =============================================================================
+
+@app.get("/api/advanced")
+def advanced_modules_index():
+    """List all available advanced analysis modules"""
+    return {
+        "title": "Advanced Hydrogeological Analysis Modules",
+        "description": "10 specialized modules for groundwater analysis",
+        "modules": {
+            "1_asi": {
+                "name": "Aquifer Suitability Index",
+                "endpoint": "/api/advanced/asi",
+                "description": "0-5 score for storage/transmission potential",
+                "requires": ["state OR district"],
+                "dependencies": "none"
+            },
+            "2_network_density": {
+                "name": "Well Network Density Analysis",
+                "endpoint": "/api/advanced/network-density",
+                "description": "Signal strength and local density mapping",
+                "requires": ["state OR district"],
+                "dependencies": "none"
+            },
+            "3_sass": {
+                "name": "Spatio-Temporal Aquifer Stress Score",
+                "endpoint": "/api/advanced/sass",
+                "description": "Composite stress index using wells + GRACE + rainfall",
+                "requires": ["state OR district", "year", "month"],
+                "dependencies": "GRACE, rainfall"
+            },
+            "4_grace_divergence": {
+                "name": "GRACE vs Ground Divergence",
+                "endpoint": "/api/advanced/grace-divergence",
+                "description": "Pixel-level difference between satellite and wells",
+                "requires": ["year", "month"],
+                "dependencies": "GRACE"
+            },
+            "5_forecast": {
+                "name": "GWL Forecasting",
+                "endpoint": "/api/advanced/forecast",
+                "description": "12-month forward prediction using trend + GRACE",
+                "requires": ["state OR district"],
+                "dependencies": "GRACE (recommended)"
+            },
+            "6_recharge_planning": {
+                "name": "Recharge Structure Recommendation",
+                "endpoint": "/api/advanced/recharge-planning",
+                "description": "MAR potential and structure mix",
+                "requires": ["state OR district"],
+                "dependencies": "rainfall (recommended)"
+            },
+            "7_significant_trends": {
+                "name": "Significance-Aware Trend Mapping",
+                "endpoint": "/api/advanced/significant-trends",
+                "description": "Sites with statistically robust trends (Mann-Kendall/OLS)",
+                "requires": ["state OR district"],
+                "dependencies": "pymannkendall (optional)"
+            },
+            "8_changepoints": {
+                "name": "Change-Point Detection",
+                "endpoint": "/api/advanced/changepoints",
+                "description": "Structural breaks using PELT algorithm",
+                "requires": ["state OR district"],
+                "dependencies": "ruptures (required)"
+            },
+            "9_lag_correlation": {
+                "name": "Rainfall→GWL Lag Correlation",
+                "endpoint": "/api/advanced/lag-correlation",
+                "description": "Optimal response lag for each site",
+                "requires": ["state OR district"],
+                "dependencies": "rainfall"
+            },
+            "10_hotspots": {
+                "name": "Decline Hotspot Clustering",
+                "endpoint": "/api/advanced/hotspots",
+                "description": "Spatial clustering of declining sites (DBSCAN)",
+                "requires": ["state OR district"],
+                "dependencies": "none"
+            }
+        },
+        "optional_dependencies": {
+            "ruptures": {
+                "status": "available" if RUPTURES_AVAILABLE else "missing",
+                "install": "pip install ruptures",
+                "required_for": ["changepoints"]
+            },
+            "pymannkendall": {
+                "status": "available" if MK_AVAILABLE else "missing",
+                "install": "pip install pymannkendall",
+                "required_for": ["significant_trends (enhanced)"]
+            }
+        },
+        "usage_example": {
+            "asi": "GET /api/advanced/asi?state=Chhattisgarh",
+            "sass": "GET /api/advanced/sass?state=Chhattisgarh&year=2023&month=6",
+            "forecast": "GET /api/advanced/forecast?district=Raipur&state=Chhattisgarh&forecast_months=12"
+        }
+    }
 
 # =============================================================================
 # RUN SERVER
@@ -1747,16 +3907,19 @@ def health_check():
 if __name__ == "__main__":
     import uvicorn
     print("\n" + "="*80)
-    print("🚀 GeoHydro API v5.1.0 - Dash-Compatible Edition")
+    print("🚀 GeoHydro API v6.1.0 - FIXED (GRACE & Rainfall NaN Issues Resolved)")
     print("="*80)
     print(f"📊 GRACE Months Available: {len(GRACE_BAND_MAPPING)}")
+    print(f"🌧️  Rainfall Years Available: {len(RAINFALL_TABLES)}")
     print(f"🤖 Chatbot Status: {'✅ Enabled' if CHATBOT_ENABLED else '⚠️  Disabled'}")
-    print(f"🌧️  Rainfall: Monthly totals for Raw view")
-    print(f"📈 Decomposition: Forced monthly for seasonal/deseasonalized")
+    print(f"🔗 Unified Timeseries: Wells + GRACE + Rainfall")
+    print(f"✅ FIXED: GRACE/Rainfall queries now match working map overlay patterns")
+    print(f"🔍 NEW: Diagnostic endpoint at /api/debug/raster-info")
     print("="*80)
     print("\n🌐 API Documentation: http://localhost:8000/docs")
     print("🏥 Health Check: http://localhost:8000/health")
     print("💬 Chatbot: POST http://localhost:8000/api/chat")
-    print("📊 Timeseries: GET http://localhost:8000/api/wells/timeseries")
+    print("📊 Unified Timeseries: GET http://localhost:8000/api/wells/timeseries")
+    print("🔍 Diagnostic: GET http://localhost:8000/api/debug/raster-info")
     print("\n")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
