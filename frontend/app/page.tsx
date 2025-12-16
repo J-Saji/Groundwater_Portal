@@ -265,7 +265,19 @@ interface MapContext {
     season: string | null;
   };
   data_summary: {
-    [key: string]: any;
+    [key: string]: any; // Allows dynamic module data
+    active_module?: string; // NEW: Track which advanced module is active
+    asi?: any;
+    network_density?: any;
+    sass?: any;
+    divergence?: any;
+    forecast?: any;
+    recharge?: any;
+    significant_trends?: any;
+    changepoints?: any;
+    lag_correlation?: any;
+    hotspots?: any;
+    timeseries?: any;
   };
 }
 
@@ -309,7 +321,7 @@ interface ASIResponse {
   };
 }
 
-interface NetworkDensityPoint {
+interface NetworkDensitySitePoint {
   site_id: string;
   latitude: number;
   longitude: number;
@@ -319,6 +331,12 @@ interface NetworkDensityPoint {
   n_observations: number;
   local_density_per_km2: number;
   neighbors_within_radius: number;
+}
+
+interface NetworkDensityGridPoint {
+  latitude: number;
+  longitude: number;
+  density_per_1000km2: number;
 }
 
 interface NetworkDensityResponse {
@@ -331,9 +349,18 @@ interface NetworkDensityResponse {
     avg_strength: number;
     avg_density: number;
     median_observations: number;
+    mean_gridded_density: number;
+    max_gridded_density: number;
   };
-  count: number;
-  data: NetworkDensityPoint[];
+  map1_site_level: {
+    count: number;
+    data: NetworkDensitySitePoint[];
+  };
+  map2_gridded: {
+    count: number;
+    grid_resolution: string;
+    data: NetworkDensityGridPoint[];
+  };
 }
 
 interface SASSPoint {
@@ -396,6 +423,7 @@ interface ForecastPoint {
   trend_component: number;
   grace_component: number;
   n_months_training: number;
+  mean_grace_contribution: number;
 }
 
 interface ForecastResponse {
@@ -485,7 +513,13 @@ interface SignificantTrendsResponse {
   count: number;
   data: SignificantTrendPoint[];
 }
-
+interface ChangepointCoverageSite {
+  site_id: string;
+  n_months: number;
+  date_start: string;
+  date_end: string;
+  span_years: number;
+}
 interface ChangepointSite {
   site_id: string;
   latitude: number;
@@ -508,6 +542,7 @@ interface ChangepointResponse {
     sites_with_changepoints: number;
     detection_rate: number;
     avg_series_length: number;
+    avg_span_years: number;
   };
   changepoints: {
     count: number;
@@ -515,7 +550,7 @@ interface ChangepointResponse {
   };
   coverage: {
     count: number;
-    data: any[];
+    data: ChangepointCoverageSite[];
   };
 }
 
@@ -642,6 +677,16 @@ const getWellColor = (category: string): string => {
 };
 
 // ============= NEW: Advanced Module Color Helpers =============
+const getStressColor = (category: string): string => {
+  switch (category) {
+    case 'Critical': return '#DC2626';
+    case 'Stressed': return '#F59E0B';
+    case 'Moderate': return '#FCD34D';
+    case 'Healthy': return '#22C55E';
+    default: return '#9CA3AF';
+  }
+};
+
 const getASIColor = (score: number): string => {
   // Match backend YlGn colorscale (Yellow-Green)
   if (score < 1) return "#FEE5D9";      // Very light yellow
@@ -663,6 +708,15 @@ const getSASSColor = (score: number): string => {
   if (score < 1) return "#FCD34D";
   if (score < 2) return "#F59E0B";
   return "#DC2626";
+};
+
+const getDensityColor = (density: number): string => {
+  // density in sites per 1000 km²
+  if (density < 5) return "#FEF0D9";     // Very sparse
+  if (density < 10) return "#FDCC8A";    // Sparse
+  if (density < 20) return "#FC8D59";    // Moderate
+  if (density < 40) return "#E34A33";    // Dense
+  return "#B30000";                       // Very dense
 };
 
 const getDivergenceColor = (value: number): string => {
@@ -776,6 +830,7 @@ export default function Home() {
 
     const dataSummary: any = {};
 
+    // ============= EXISTING MAP LAYERS CONTEXT =============
     if (showAquifers && aquifers.length > 0) {
       dataSummary.aquifers = {
         count: aquifers.length,
@@ -832,6 +887,207 @@ export default function Home() {
       };
     }
 
+    // ============= NEW: ADVANCED MODULES CONTEXT =============
+    
+    // Add active advanced module info
+    if (selectedAdvancedModule) {
+      dataSummary.active_module = selectedAdvancedModule;
+    }
+
+    // ASI Context
+    if (selectedAdvancedModule === 'ASI' && asiData) {
+      dataSummary.asi = {
+        module: asiData.module,
+        description: asiData.description,
+        statistics: {
+          mean_asi: asiData.statistics.mean_asi,
+          median_asi: asiData.statistics.median_asi,
+          min_asi: asiData.statistics.min_asi,
+          max_asi: asiData.statistics.max_asi,
+          dominant_aquifer: asiData.statistics.dominant_aquifer,
+          total_area_km2: asiData.statistics.total_area_km2
+        },
+        polygons_analyzed: asiData.count,
+        high_quality_count: asiData.geojson.features.filter(f => f.properties.asi_score > 3).length,
+        low_quality_count: asiData.geojson.features.filter(f => f.properties.asi_score < 2).length
+      };
+    }
+
+    // Network Density Context
+    if (selectedAdvancedModule === 'NETWORK_DENSITY' && networkDensityData) {
+      dataSummary.network_density = {
+        module: networkDensityData.module,
+        description: networkDensityData.description,
+        statistics: {
+          total_sites: networkDensityData.statistics.total_sites,
+          avg_strength: networkDensityData.statistics.avg_strength,
+          avg_local_density: networkDensityData.statistics.avg_local_density
+        },
+        site_level_count: networkDensityData.map1_site_level.count,
+        grid_count: networkDensityData.map2_gridded.count,
+        radius_km: networkDensityData.parameters.radius_km
+      };
+    }
+
+    // SASS Context
+    if (selectedAdvancedModule === 'SASS' && sassData) {
+      dataSummary.sass = {
+        module: sassData.module,
+        description: sassData.description,
+        formula: sassData.formula,
+        statistics: {
+          mean_sass: sassData.statistics.mean_sass,
+          max_sass: sassData.statistics.max_sass,
+          stressed_sites: sassData.statistics.stressed_sites
+        },
+        sites_analyzed: sassData.count,
+        year: sassData.filters.year,
+        month: sassData.filters.month
+      };
+    }
+
+    // Divergence Context
+    if (selectedAdvancedModule === 'GRACE_DIVERGENCE' && divergenceData) {
+      dataSummary.divergence = {
+        module: divergenceData.module,
+        description: divergenceData.description,
+        statistics: {
+          mean_divergence: divergenceData.statistics.mean_divergence,
+          positive_divergence_pixels: divergenceData.statistics.positive_divergence_pixels,
+          negative_divergence_pixels: divergenceData.statistics.negative_divergence_pixels
+        },
+        pixels_analyzed: divergenceData.count,
+        interpretation: divergenceData.statistics.mean_divergence > 0 
+          ? "GRACE shows MORE water than wells suggest" 
+          : "GRACE shows LESS water than wells suggest"
+      };
+    }
+
+    // Forecast Context
+    if (selectedAdvancedModule === 'FORECAST' && forecastData) {
+      dataSummary.forecast = {
+        module: forecastData.module,
+        description: forecastData.description,
+        method: forecastData.method,
+        statistics: {
+          mean_change_m: forecastData.statistics.mean_change_m,
+          median_change_m: forecastData.statistics.median_change_m,
+          declining_cells: forecastData.statistics.declining_cells,
+          recovering_cells: forecastData.statistics.recovering_cells,
+          mean_r_squared: forecastData.statistics.mean_r_squared,
+          mean_grace_contribution: forecastData.statistics.mean_grace_contribution
+        },
+        forecast_months: forecastData.parameters.forecast_months,
+        grid_cells: forecastData.count,
+        grace_used: forecastData.parameters.grace_used,
+        overall_trend: forecastData.statistics.mean_change_m > 0 ? "Declining" : "Recovering"
+      };
+    }
+
+    // Recharge Planning Context
+    if (selectedAdvancedModule === 'RECHARGE' && rechargeData) {
+      dataSummary.recharge = {
+        module: rechargeData.module,
+        description: rechargeData.description,
+        potential: {
+          total_recharge_potential_mcm: rechargeData.potential.total_recharge_potential_mcm,
+          per_km2_mcm: rechargeData.potential.per_km2_mcm
+        },
+        analysis_parameters: {
+          area_km2: rechargeData.analysis_parameters.area_km2,
+          dominant_lithology: rechargeData.analysis_parameters.dominant_lithology,
+          monsoon_rainfall_m: rechargeData.analysis_parameters.monsoon_rainfall_m
+        },
+        structure_plan_summary: rechargeData.structure_plan.map(s => ({
+          type: s.structure_type,
+          units: s.recommended_units,
+          capacity_mcm: s.total_capacity_mcm
+        })),
+        site_recommendations_count: rechargeData.count
+      };
+    }
+
+    // Significant Trends Context
+    if (selectedAdvancedModule === 'SIGNIFICANT_TRENDS' && significantTrendsData) {
+      dataSummary.significant_trends = {
+        module: significantTrendsData.module,
+        description: significantTrendsData.description,
+        statistics: {
+          total_significant: significantTrendsData.statistics.total_significant,
+          declining: significantTrendsData.statistics.declining,
+          recovering: significantTrendsData.statistics.recovering,
+          mean_slope: significantTrendsData.statistics.mean_slope
+        },
+        p_threshold: significantTrendsData.parameters.p_threshold,
+        method: significantTrendsData.parameters.method
+      };
+    }
+
+    // Changepoints Context
+    if (selectedAdvancedModule === 'CHANGEPOINTS' && changepointsData) {
+      dataSummary.changepoints = {
+        module: changepointsData.module,
+        description: changepointsData.description,
+        statistics: {
+          total_sites_analyzed: changepointsData.statistics.total_sites_analyzed,
+          sites_with_changepoints: changepointsData.statistics.sites_with_changepoints,
+          detection_rate: changepointsData.statistics.detection_rate
+        },
+        changepoints_found: changepointsData.changepoints.count,
+        algorithm: changepointsData.parameters.algorithm
+      };
+    }
+
+    // Lag Correlation Context
+    if (selectedAdvancedModule === 'LAG_CORRELATION' && lagCorrelationData) {
+      dataSummary.lag_correlation = {
+        module: lagCorrelationData.module,
+        description: lagCorrelationData.description,
+        statistics: {
+          mean_lag: lagCorrelationData.statistics.mean_lag,
+          median_lag: lagCorrelationData.statistics.median_lag,
+          mean_abs_correlation: lagCorrelationData.statistics.mean_abs_correlation
+        },
+        sites_analyzed: lagCorrelationData.count,
+        max_lag_tested: lagCorrelationData.parameters.max_lag_months,
+        lag_distribution: lagCorrelationData.statistics.lag_distribution
+      };
+    }
+
+    // Hotspots Context
+    if (selectedAdvancedModule === 'HOTSPOTS' && hotspotsData) {
+      dataSummary.hotspots = {
+        module: hotspotsData.module,
+        description: hotspotsData.description,
+        statistics: {
+          total_declining_sites: hotspotsData.statistics.total_declining_sites,
+          n_clusters: hotspotsData.statistics.n_clusters,
+          clustered_points: hotspotsData.statistics.clustered_points,
+          noise_points: hotspotsData.statistics.noise_points
+        },
+        clusters_detail: hotspotsData.clusters.map(c => ({
+          cluster_id: c.cluster_id,
+          n_sites: c.n_sites,
+          mean_slope: c.mean_slope
+        })),
+        eps_km: hotspotsData.parameters.eps_km
+      };
+    }
+
+    // ============= TIMESERIES CONTEXT =============
+    if (showTimeseries && timeseriesResponse) {
+      dataSummary.timeseries = {
+        view: timeseriesResponse.view,
+        aggregation: timeseriesResponse.aggregation,
+        data_points: timeseriesResponse.count,
+        statistics: timeseriesResponse.statistics ? {
+          gwl_trend: timeseriesResponse.statistics.gwl_trend,
+          grace_trend: timeseriesResponse.statistics.grace_trend,
+          rainfall_trend: timeseriesResponse.statistics.rainfall_trend
+        } : null
+      };
+    }
+
     return {
       active_layers: activeLayers,
       region: {
@@ -846,11 +1102,14 @@ export default function Home() {
       data_summary: dataSummary
     };
   }, [
-    showAquifers, showGrace, showRainfall, showWells,
+    showAquifers, showGrace, showRainfall, showWells, showTimeseries,
     aquifers, graceResponse, rainfallResponse, wellsResponse, wellsData,
-    summaryData, selectedState, selectedDistrict, selectedYear, selectedMonth, selectedSeason
+    summaryData, timeseriesResponse,
+    selectedAdvancedModule, asiData, networkDensityData, sassData, 
+    divergenceData, forecastData, rechargeData, significantTrendsData,
+    changepointsData, lagCorrelationData, hotspotsData,
+    selectedState, selectedDistrict, selectedYear, selectedMonth, selectedSeason
   ]);
-
   const scrollChatToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -908,12 +1167,83 @@ export default function Home() {
     }
   };
 
-  const suggestedQuestions = [
-    "What is GRACE satellite data?",
-    "Explain groundwater depletion in India",
-    "What patterns do you see in this map?",
-    "Analyze the current data displayed"
-  ];
+  const getSuggestedQuestions = (): string[] => {
+    // Base questions
+    const baseQuestions = [
+      "What is GRACE satellite data?",
+      "Explain groundwater depletion in India"
+    ];
+
+    // Module-specific questions
+    const moduleQuestions: Record<string, string[]> = {
+      'ASI': [
+        "Which aquifer zones have the best storage potential?",
+        "What does the ASI score mean for recharge suitability?",
+        "How reliable is this ASI assessment?"
+      ],
+      'NETWORK_DENSITY': [
+        "Where are the monitoring coverage gaps?",
+        "Which areas have the strongest GWL signals?",
+        "What does local density tell us about data quality?"
+      ],
+      'SASS': [
+        "Which sites are most stressed right now?",
+        "How does GRACE data relate to ground measurements here?",
+        "What is causing the high stress scores?"
+      ],
+      'GRACE_DIVERGENCE': [
+        "Why is GRACE diverging from ground measurements?",
+        "What does positive/negative divergence indicate?",
+        "Should we trust GRACE or wells more in this region?"
+      ],
+      'FORECAST': [
+        "What does this forecast indicate for water security?",
+        "How much is the GRACE contribution to the prediction?",
+        "Which areas should prioritize intervention?"
+      ],
+      'RECHARGE': [
+        "What structures are best for this region?",
+        "How was the recharge potential calculated?",
+        "Why are different structures recommended for different sites?"
+      ],
+      'SIGNIFICANT_TRENDS': [
+        "Which sites have the most reliable declining trends?",
+        "What does the p-value tell us about significance?",
+        "Are these trends accelerating or stable?"
+      ],
+      'CHANGEPOINTS': [
+        "What caused these structural breaks in GWL?",
+        "Do changepoints align with policy or climate events?",
+        "How should we interpret regime shifts?"
+      ],
+      'LAG_CORRELATION': [
+        "What does the rainfall-GWL lag reveal about aquifer type?",
+        "Why do some sites respond faster than others?",
+        "How can lag information guide irrigation timing?"
+      ],
+      'HOTSPOTS': [
+        "Where are the priority intervention zones?",
+        "What connects sites in the same cluster?",
+        "How should we address hotspot clusters?"
+      ]
+    };
+
+    // Return module-specific questions if active, otherwise base questions
+    if (selectedAdvancedModule && moduleQuestions[selectedAdvancedModule]) {
+      return [...moduleQuestions[selectedAdvancedModule], "Explain this analysis in simple terms"];
+    }
+
+    // Default questions when viewing maps
+    if (showGrace || showRainfall || showWells) {
+      return [
+        ...baseQuestions,
+        "What patterns do you see in this map?",
+        "Analyze the current data displayed"
+      ];
+    }
+
+    return baseQuestions;
+  };
 
   const activeLayers = [
     { id: 'aquifers', name: 'Aquifers', icon: '🔷', show: showAquifers, color: 'purple' },
@@ -940,7 +1270,7 @@ export default function Home() {
         case 'NETWORK_DENSITY':
           const netRes = await axios.get<NetworkDensityResponse>(`${backendURL}/api/advanced/network-density`, { params });
           setNetworkDensityData(netRes.data);
-          showAlert(`Network Density: ${netRes.data.count} sites analyzed`, "success");
+          showAlert(`Network Density: Map1=${netRes.data.map1_site_level.count} sites, Map2=${netRes.data.map2_gridded.count} grid cells`, "success");
           break;
           
         case 'SASS':
@@ -972,23 +1302,24 @@ export default function Home() {
         case 'FORECAST':
           const foreRes = await axios.get<ForecastResponse>(`${backendURL}/api/advanced/forecast`, { params });
           setForecastData(foreRes.data);
-          showAlert(`Forecast: ${foreRes.data.count} months predicted`, "success");
+          showAlert(`Forecast: ${foreRes.data.count} grid cells predicted (GRACE contribution: ${foreRes.data.statistics.mean_grace_contribution.toFixed(3)} m)`, "success");
           break;
           
-        case 'RECHARGE':
-          // Recharge planning requires year and month for site recommendations
-          if (!selectedMonth) {
-            showAlert("Please select a month for site-specific recharge recommendations", "warning");
-            // Still load without month for regional analysis
-            params.year = selectedYear;
-          } else {
-            params.year = selectedYear;
-            params.month = selectedMonth;
-          }
-          const rechRes = await axios.get<RechargeResponse>(`${backendURL}/api/advanced/recharge-planning`, { params });
-          setRechargeData(rechRes.data);
-          showAlert(`Recharge: ${rechRes.data.potential.total_recharge_potential_mcm.toFixed(2)} MCM potential`, "success");
-          break;
+
+      case 'RECHARGE':
+        // Recharge planning requires year and month for site recommendations
+        if (!selectedMonth) {
+          showAlert("Please select a month for site-specific recharge recommendations", "warning");
+          // Still load without month for regional analysis
+          params.year = selectedYear;
+        } else {
+          params.year = selectedYear;
+          params.month = selectedMonth;
+        }
+        const rechRes = await axios.get<RechargeResponse>(`${backendURL}/api/advanced/recharge-planning`, { params });
+        setRechargeData(rechRes.data);
+        showAlert(`Recharge: ${rechRes.data.potential.total_recharge_potential_mcm.toFixed(2)} MCM potential`, "success");
+        break;
 
           
         case 'SIGNIFICANT_TRENDS':
@@ -1000,7 +1331,7 @@ export default function Home() {
         case 'CHANGEPOINTS':
           const cpRes = await axios.get<ChangepointResponse>(`${backendURL}/api/advanced/changepoints`, { params });
           setChangepointsData(cpRes.data);
-          showAlert(`Changepoints: ${cpRes.data.changepoints.count} sites with breaks`, "success");
+          showAlert(`Changepoints: ${cpRes.data.changepoints.count} sites with breaks, ${cpRes.data.coverage.count} total sites analyzed`, "success");
           break;
           
         case 'LAG_CORRELATION':
@@ -1696,92 +2027,198 @@ export default function Home() {
       );
     }
     // Network Density Visualization
+// Network Density Visualization
     if (selectedAdvancedModule === 'NETWORK_DENSITY' && networkDensityData) {
       return (
         <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-indigo-400">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <span className="text-2xl">📊</span>
-              <h3 className="text-lg font-bold text-gray-800">Well Network Density Analysis</h3>
+              <h3 className="text-lg font-bold text-gray-800">Well Network Density Analysis - Dual Map View</h3>
             </div>
             <span className="text-sm bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full font-semibold">
-              {networkDensityData.count} sites
+              Map1: {networkDensityData.map1_site_level?.count || 0} sites | Map2: {networkDensityData.map2_gridded?.count || 0} grid cells
             </span>
           </div>
 
+          {/* Statistics Cards */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
             <div className="bg-indigo-50 p-3 rounded-lg border border-indigo-200">
               <div className="text-xs text-gray-600 mb-1">Total Sites</div>
-              <div className="text-2xl font-bold text-indigo-600">{networkDensityData.statistics.total_sites}</div>
+              <div className="text-2xl font-bold text-indigo-600">
+                {networkDensityData.statistics?.total_sites ?? 0}
+              </div>
             </div>
             <div className="bg-purple-50 p-3 rounded-lg border border-purple-200">
               <div className="text-xs text-gray-600 mb-1">Avg Strength</div>
-              <div className="text-2xl font-bold text-purple-600">{networkDensityData.statistics.avg_strength.toFixed(3)}</div>
+              <div className="text-2xl font-bold text-purple-600">
+                {networkDensityData.statistics?.avg_strength?.toFixed(3) ?? 'N/A'}
+              </div>
             </div>
             <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
-              <div className="text-xs text-gray-600 mb-1">Avg Density</div>
-              <div className="text-xl font-bold text-blue-600">{networkDensityData.statistics.avg_density.toFixed(4)} /km²</div>
+              <div className="text-xs text-gray-600 mb-1">Avg Local Density</div>
+              <div className="text-xl font-bold text-blue-600">
+                {networkDensityData.statistics?.avg_local_density?.toFixed(4) ?? 'N/A'} /km²
+              </div>
             </div>
             <div className="bg-green-50 p-3 rounded-lg border border-green-200">
               <div className="text-xs text-gray-600 mb-1">Median Obs</div>
-              <div className="text-2xl font-bold text-green-600">{networkDensityData.statistics.median_observations}</div>
+              <div className="text-2xl font-bold text-green-600">
+                {networkDensityData.statistics?.median_observations ?? 0}
+              </div>
             </div>
           </div>
 
-          <div className="h-[500px] relative rounded-lg overflow-hidden">
-            <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`network-${mapKey}`}>
-              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-              {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#6366F1", weight: 3, fillOpacity: 0.1 }} />}
-              
-              {networkDensityData.data.map((point, i) => {
-                const size = 4 + (point.local_density_per_km2 * 100);
-                return (
-                  <CircleMarker
-                    key={`net_${i}`}
-                    center={[point.latitude, point.longitude]}
-                    radius={Math.min(size, 15)}
-                    fillColor="#6366F1"
-                    color="white"
-                    weight={1}
-                    fillOpacity={0.7}
-                  >
-                    <Popup>
-                      <div style={{ fontFamily: 'sans-serif', minWidth: '200px' }}>
-                        <strong>Site: {point.site_id}</strong><br/>
-                        <hr style={{ margin: '5px 0' }}/>
-                        <table style={{ width: '100%', fontSize: '12px' }}>
-                          <tbody>
-                            <tr><td><strong>Strength:</strong></td><td>{point.strength.toFixed(3)}</td></tr>
-                            <tr><td><strong>Density:</strong></td><td>{point.local_density_per_km2.toFixed(4)} /km²</td></tr>
-                            <tr><td><strong>Neighbors:</strong></td><td>{point.neighbors_within_radius} within {networkDensityData.parameters.radius_km}km</td></tr>
-                            <tr><td><strong>Observations:</strong></td><td>{point.n_observations}</td></tr>
-                            <tr><td><strong>Trend:</strong></td><td>{point.slope_m_per_year.toFixed(4)} m/yr</td></tr>
-                          </tbody>
-                        </table>
+          {/* Dual Map Layout */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+            
+            {/* MAP 1: Site-Level Strength */}
+            <div className="bg-gradient-to-br from-blue-50 to-indigo-50 p-4 rounded-lg border-2 border-indigo-300">
+              <h4 className="font-bold text-sm mb-2 text-indigo-900">
+                Map 1: Site-Level Strength (Symbol Size = Local Density)
+              </h4>
+              <div className="h-[400px] relative rounded-lg overflow-hidden">
+                <MapContainer 
+                  center={center} 
+                  zoom={zoom} 
+                  style={{ height: "100%", width: "100%" }} 
+                  key={`network-map1-${mapKey}`}
+                >
+                  <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                  
+                  {districtGeo && (
+                    <GeoJSON 
+                      data={districtGeo} 
+                      style={{ color: "#6366F1", weight: 3, fillOpacity: 0.1 }} 
+                    />
+                  )}
+                  
+                  {networkDensityData.map1_site_level?.data?.map((point, i) => {
+                    const size = 4 + (point.local_density_per_km2 * 200);
+                    return (
+                      <CircleMarker
+                        key={`net1_${i}`}
+                        center={[point.latitude, point.longitude]}
+                        radius={Math.min(size, 20)}
+                        fillColor="#6366F1"
+                        color="white"
+                        weight={1}
+                        fillOpacity={0.7}
+                      >
+                        <Popup>
+                          <div style={{ fontFamily: 'sans-serif', minWidth: '220px' }}>
+                            <strong style={{ fontSize: '14px', color: '#6366F1' }}>
+                              Site: {point.site_id}
+                            </strong><br/>
+                            <hr style={{ margin: '5px 0' }}/>
+                            <table style={{ width: '100%', fontSize: '12px' }}>
+                              <tbody>
+                                <tr><td><strong>Strength:</strong></td><td>{point.strength.toFixed(3)}</td></tr>
+                                <tr><td><strong>Local Density:</strong></td><td>{point.local_density_per_km2.toFixed(4)} /km²</td></tr>
+                                <tr><td><strong>Neighbors:</strong></td><td>{point.neighbors_within_radius} within {networkDensityData.parameters?.radius_km}km</td></tr>
+                                <tr><td><strong>Observations:</strong></td><td>{point.n_observations}</td></tr>
+                                <tr><td><strong>Trend:</strong></td><td>{point.slope_m_per_year.toFixed(4)} m/yr</td></tr>
+                                <tr><td><strong>GWL Std:</strong></td><td>{point.gwl_std.toFixed(2)} m</td></tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        </Popup>
+                      </CircleMarker>
+                    );
+                  })}
+                </MapContainer>
+
+                {/* Map 1 Legend */}
+                <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-indigo-300">
+                  <div className="text-xs font-bold mb-2 text-indigo-900">Symbol Size = Density</div>
+                  <p className="text-xs text-gray-600">
+                    Larger circles = higher local well density within {networkDensityData.parameters?.radius_km}km radius
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* MAP 2: Gridded Density Heatmap */}
+            <div className="bg-gradient-to-br from-orange-50 to-red-50 p-4 rounded-lg border-2 border-orange-300">
+              <h4 className="font-bold text-sm mb-2 text-orange-900">
+                Map 2: Gridded Density Heatmap (sites per 1000 km²)
+              </h4>
+              <div className="h-[400px] relative rounded-lg overflow-hidden">
+                <MapContainer 
+                  center={center} 
+                  zoom={zoom} 
+                  style={{ height: "100%", width: "100%" }} 
+                  key={`network-map2-${mapKey}`}
+                >
+                  <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                  
+                  {districtGeo && (
+                    <GeoJSON 
+                      data={districtGeo} 
+                      style={{ color: "#F97316", weight: 3, fillOpacity: 0.1 }} 
+                    />
+                  )}
+                  
+                  {networkDensityData.map2_gridded?.data?.map((point, i) => (
+                    <CircleMarker
+                      key={`net2_${i}`}
+                      center={[point.y, point.x]}
+                      radius={8}
+                      fillColor={getDensityColor(point.density_per_1000km2)}
+                      color="white"
+                      weight={1}
+                      fillOpacity={0.8}
+                    >
+                      <Popup>
+                        <div style={{ fontFamily: 'sans-serif', minWidth: '180px' }}>
+                          <strong style={{ fontSize: '14px' }}>Grid Cell Density</strong><br/>
+                          <hr style={{ margin: '5px 0' }}/>
+                          <div style={{ fontSize: '12px' }}>
+                            <div><strong>Density:</strong> {point.density_per_1000km2.toFixed(2)} sites/1000km²</div>
+                            <div><strong>Location:</strong> {point.y.toFixed(4)}°N, {point.x.toFixed(4)}°E</div>
+                          </div>
+                        </div>
+                      </Popup>
+                    </CircleMarker>
+                  ))}
+                </MapContainer>
+
+                {/* Map 2 Legend */}
+                <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-orange-300">
+                  <div className="text-xs font-bold mb-2 text-orange-900">Density Scale (sites/1000km²)</div>
+                  <div className="space-y-1">
+                    {[
+                      { label: 'Very Dense (>40)', density: 45 },
+                      { label: 'Dense (20-40)', density: 30 },
+                      { label: 'Moderate (10-20)', density: 15 },
+                      { label: 'Sparse (5-10)', density: 7 },
+                      { label: 'Very Sparse (<5)', density: 3 }
+                    ].map((item, idx) => (
+                      <div key={idx} className="flex items-center gap-2">
+                        <div 
+                          className="w-4 h-4 rounded border border-gray-400" 
+                          style={{ backgroundColor: getDensityColor(item.density) }}
+                        ></div>
+                        <span className="text-xs">{item.label}</span>
                       </div>
-                    </Popup>
-                  </CircleMarker>
-                );
-              })}
-            </MapContainer>
-
-            <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-indigo-300">
-              <div className="text-xs font-bold mb-2">Symbol Size = Density</div>
-              <p className="text-xs text-gray-600">Larger circles indicate higher local well density within {networkDensityData.parameters.radius_km}km radius</p>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
-          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+          {/* Methodology Explanation */}
+          <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
             <p className="text-sm text-blue-800">
-              <strong>ℹ️ What:</strong> Signal strength (|slope|/σ) with symbol size as local network density.
-              <br/><strong>How:</strong> Annualized GWL slope normalized by site variability; density computed within {networkDensityData.parameters.radius_km} km.
-              <br/><strong>Significance:</strong> Find robust signal corridors (strong + dense) and blind spots (weak or sparse).
+              <strong>ℹ️ What:</strong> Dual-map network analysis showing (1) site-level signal strength with local density and (2) absolute density grid
+              <br/><strong>How:</strong> Map 1: Annualized GWL slope normalized by site variability (strength = |slope|/σ), symbol size = local density within {networkDensityData.parameters?.radius_km}km. Map 2: Absolute density per 1000km² on regular grid clipped to AOI.
+              <br/><strong>Significance:</strong> Find robust signal corridors (strong + dense in Map 1) and identify sparse coverage zones (low values in Map 2).
             </p>
           </div>
         </div>
       );
     }
-
     // SASS Visualization
     if (selectedAdvancedModule === 'SASS' && sassData) {
       return (
@@ -1878,170 +2315,170 @@ export default function Home() {
     }
 
     // Forecast Visualization (with Plotly chart)
-if (selectedAdvancedModule === 'FORECAST' && forecastData) {
-  return (
-    <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-teal-400">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <span className="text-2xl">📈</span>
-          <h3 className="text-lg font-bold text-gray-800">GWL Forecasting (Grid-based)</h3>
-        </div>
-        <span className="text-sm bg-teal-100 text-teal-800 px-3 py-1 rounded-full font-semibold">
-          {forecastData.count} grid cells
-        </span>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
-        <div className="bg-teal-50 p-3 rounded-lg border border-teal-200">
-          <div className="text-xs text-gray-600 mb-1">Mean Change (12mo)</div>
-          <div className={`text-2xl font-bold ${forecastData.statistics.mean_change_m > 0 ? 'text-red-600' : 'text-green-600'}`}>
-            {forecastData.statistics.mean_change_m > 0 ? '+' : ''}{forecastData.statistics.mean_change_m.toFixed(3)} m
+    if (selectedAdvancedModule === 'FORECAST' && forecastData) {
+      return (
+        <div className="lg:col-span-2 xl:col-span-3 bg-white rounded-xl shadow-2xl p-6 border-2 border-teal-400">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">📈</span>
+              <h3 className="text-lg font-bold text-gray-800">GWL Forecasting (Grid-based)</h3>
+            </div>
+            <span className="text-sm bg-teal-100 text-teal-800 px-3 py-1 rounded-full font-semibold">
+              {forecastData.count} grid cells
+            </span>
           </div>
-        </div>
-        <div className="bg-red-50 p-3 rounded-lg border border-red-200">
-          <div className="text-xs text-gray-600 mb-1">Declining Cells</div>
-          <div className="text-2xl font-bold text-red-600">{forecastData.statistics.declining_cells}</div>
-        </div>
-        <div className="bg-green-50 p-3 rounded-lg border border-green-200">
-          <div className="text-xs text-gray-600 mb-1">Recovering Cells</div>
-          <div className="text-2xl font-bold text-green-600">{forecastData.statistics.recovering_cells}</div>
-        </div>
-        <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
-          <div className="text-xs text-gray-600 mb-1">Mean R²</div>
-          <div className="text-2xl font-bold text-blue-600">{forecastData.statistics.mean_r_squared.toFixed(3)}</div>
-        </div>
-      </div>
 
-      <div className="bg-indigo-50 rounded-lg p-3 border border-indigo-200 mb-4">
-        <h4 className="font-bold text-sm mb-2 text-indigo-900">Forecast Parameters</h4>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-          <div><strong>Horizon:</strong> {forecastData.parameters.forecast_months} months</div>
-          <div><strong>Neighbors (k):</strong> {forecastData.parameters.k_neighbors}</div>
-          <div><strong>Grid Resolution:</strong> {forecastData.parameters.grid_resolution}×{forecastData.parameters.grid_resolution}</div>
-          <div><strong>GRACE Used:</strong> {forecastData.parameters.grace_used ? '✅ Yes' : '❌ No'}</div>
-          <div><strong>Method:</strong> {forecastData.method}</div>
-          <div><strong>Success Rate:</strong> {forecastData.statistics.success_rate.toFixed(1)}%</div>
-        </div>
-      </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+            <div className="bg-teal-50 p-3 rounded-lg border border-teal-200">
+              <div className="text-xs text-gray-600 mb-1">Mean Change (12mo)</div>
+              <div className={`text-2xl font-bold ${forecastData.statistics.mean_change_m > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                {forecastData.statistics.mean_change_m > 0 ? '+' : ''}{forecastData.statistics.mean_change_m.toFixed(3)} m
+              </div>
+            </div>
+            <div className="bg-red-50 p-3 rounded-lg border border-red-200">
+              <div className="text-xs text-gray-600 mb-1">Declining Cells</div>
+              <div className="text-2xl font-bold text-red-600">{forecastData.statistics.declining_cells}</div>
+            </div>
+            <div className="bg-green-50 p-3 rounded-lg border border-green-200">
+              <div className="text-xs text-gray-600 mb-1">Recovering Cells</div>
+              <div className="text-2xl font-bold text-green-600">{forecastData.statistics.recovering_cells}</div>
+            </div>
+            <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+              <div className="text-xs text-gray-600 mb-1">Mean R²</div>
+              <div className="text-2xl font-bold text-blue-600">{forecastData.statistics.mean_r_squared.toFixed(3)}</div>
+            </div>
+          </div>
 
-      {/* Map Visualization */}
-      <div className="h-[500px] relative rounded-lg overflow-hidden mb-4">
-        <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`forecast-${mapKey}`}>
-          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-          {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#14B8A6", weight: 3, fillOpacity: 0.1 }} />}
-          
-          {forecastData.data.map((point, i) => {
-            // Color: Red = deeper (decline), Green = shallower (recovery)
-            const getColor = (change: number) => {
-              if (change > 2) return '#7F1D1D';      // Very deep decline
-              if (change > 1) return '#DC2626';      // Strong decline
-              if (change > 0.5) return '#F87171';    // Moderate decline
-              if (change > 0) return '#FCA5A5';      // Slight decline
-              if (change > -0.5) return '#BBF7D0';   // Slight recovery
-              if (change > -1) return '#86EFAC';     // Moderate recovery
-              if (change > -2) return '#22C55E';     // Strong recovery
-              return '#15803D';                       // Very strong recovery
-            };
+          <div className="bg-indigo-50 rounded-lg p-3 border border-indigo-200 mb-4">
+            <h4 className="font-bold text-sm mb-2 text-indigo-900">Forecast Parameters</h4>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+              <div><strong>Horizon:</strong> {forecastData.parameters.forecast_months} months</div>
+              <div><strong>Neighbors (k):</strong> {forecastData.parameters.k_neighbors}</div>
+              <div><strong>Grid Resolution:</strong> {forecastData.parameters.grid_resolution}×{forecastData.parameters.grid_resolution}</div>
+              <div><strong>GRACE Used:</strong> {forecastData.parameters.grace_used ? '✅ Yes' : '❌ No'}</div>
+              <div><strong>Method:</strong> {forecastData.method}</div>
+              <div><strong>Success Rate:</strong> {forecastData.statistics.success_rate.toFixed(1)}%</div>
+            </div>
+          </div>
 
-            return (
-              <CircleMarker
-                key={`forecast_${i}`}
-                center={[point.latitude, point.longitude]}
-                radius={5}
-                fillColor={getColor(point.pred_delta_m)}
-                color="white"
-                weight={1}
-                fillOpacity={0.8}
-              >
-                <Popup>
-                  <div style={{ fontFamily: 'sans-serif', minWidth: '220px' }}>
-                    <strong style={{ fontSize: '14px', color: getColor(point.pred_delta_m) }}>
-                      Forecast: {point.pred_delta_m > 0 ? '+' : ''}{point.pred_delta_m.toFixed(3)} m
-                    </strong><br/>
-                    <hr style={{ margin: '5px 0' }}/>
-                    <table style={{ width: '100%', fontSize: '12px' }}>
-                      <tbody>
-                        <tr><td><strong>Current GWL:</strong></td><td>{point.current_gwl.toFixed(2)} m bgl</td></tr>
-                        <tr><td><strong>Forecast GWL:</strong></td><td>{point.forecast_gwl.toFixed(2)} m bgl</td></tr>
-                        <tr><td><strong>Trend Component:</strong></td><td>{point.trend_component.toFixed(3)} m</td></tr>
-                        <tr><td><strong>GRACE Component:</strong></td><td>{point.grace_component.toFixed(3)} m</td></tr>
-                        <tr><td><strong>Model R²:</strong></td><td>{point.r_squared.toFixed(3)}</td></tr>
-                        <tr><td><strong>Training Data:</strong></td><td>{point.n_months_training} months</td></tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </Popup>
-              </CircleMarker>
-            );
-          })}
-        </MapContainer>
+          {/* Map Visualization */}
+          <div className="h-[500px] relative rounded-lg overflow-hidden mb-4">
+            <MapContainer center={center} zoom={zoom} style={{ height: "100%", width: "100%" }} key={`forecast-${mapKey}`}>
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              {districtGeo && <GeoJSON data={districtGeo} style={{ color: "#14B8A6", weight: 3, fillOpacity: 0.1 }} />}
+              
+              {forecastData.data.map((point, i) => {
+                // Color: Red = deeper (decline), Green = shallower (recovery)
+                const getColor = (change: number) => {
+                  if (change > 2) return '#7F1D1D';      // Very deep decline
+                  if (change > 1) return '#DC2626';      // Strong decline
+                  if (change > 0.5) return '#F87171';    // Moderate decline
+                  if (change > 0) return '#FCA5A5';      // Slight decline
+                  if (change > -0.5) return '#BBF7D0';   // Slight recovery
+                  if (change > -1) return '#86EFAC';     // Moderate recovery
+                  if (change > -2) return '#22C55E';     // Strong recovery
+                  return '#15803D';                       // Very strong recovery
+                };
 
-        <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-teal-300">
-          <div className="text-xs font-bold mb-2">12-Month Change (m)</div>
-          <div className="space-y-1">
-            {[
-              { label: 'Strong Decline (>2m)', change: 2.5 },
-              { label: 'Moderate Decline (1-2m)', change: 1.5 },
-              { label: 'Slight Decline (0-1m)', change: 0.5 },
-              { label: 'Slight Recovery (0 to -1m)', change: -0.5 },
-              { label: 'Moderate Recovery (-1 to -2m)', change: -1.5 },
-              { label: 'Strong Recovery (<-2m)', change: -2.5 }
-            ].map((item, idx) => {
-              const getColor = (change: number) => {
-                if (change > 2) return '#7F1D1D';
-                if (change > 1) return '#DC2626';
-                if (change > 0.5) return '#F87171';
-                if (change > 0) return '#FCA5A5';
-                if (change > -0.5) return '#BBF7D0';
-                if (change > -1) return '#86EFAC';
-                if (change > -2) return '#22C55E';
-                return '#15803D';
-              };
-              return (
-                <div key={idx} className="flex items-center gap-2">
-                  <div className="w-4 h-4 rounded" style={{ backgroundColor: getColor(item.change) }}></div>
-                  <span className="text-xs">{item.label}</span>
+                return (
+                  <CircleMarker
+                    key={`forecast_${i}`}
+                    center={[point.latitude, point.longitude]}
+                    radius={5}
+                    fillColor={getColor(point.pred_delta_m)}
+                    color="white"
+                    weight={1}
+                    fillOpacity={0.8}
+                  >
+                    <Popup>
+                      <div style={{ fontFamily: 'sans-serif', minWidth: '220px' }}>
+                        <strong style={{ fontSize: '14px', color: getColor(point.pred_delta_m) }}>
+                          Forecast: {point.pred_delta_m > 0 ? '+' : ''}{point.pred_delta_m.toFixed(3)} m
+                        </strong><br/>
+                        <hr style={{ margin: '5px 0' }}/>
+                        <table style={{ width: '100%', fontSize: '12px' }}>
+                          <tbody>
+                            <tr><td><strong>Current GWL:</strong></td><td>{point.current_gwl.toFixed(2)} m bgl</td></tr>
+                            <tr><td><strong>Forecast GWL:</strong></td><td>{point.forecast_gwl.toFixed(2)} m bgl</td></tr>
+                            <tr><td><strong>Trend Component:</strong></td><td>{point.trend_component.toFixed(3)} m</td></tr>
+                            <tr><td><strong>GRACE Component:</strong></td><td>{point.grace_component.toFixed(3)} m</td></tr>
+                            <tr><td><strong>Model R²:</strong></td><td>{point.r_squared.toFixed(3)}</td></tr>
+                            <tr><td><strong>Training Data:</strong></td><td>{point.n_months_training} months</td></tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                );
+              })}
+            </MapContainer>
+
+            <div className="absolute bottom-4 right-4 z-[1000] bg-white/95 backdrop-blur-sm p-3 rounded-lg shadow-lg border-2 border-teal-300">
+              <div className="text-xs font-bold mb-2">12-Month Change (m)</div>
+              <div className="space-y-1">
+                {[
+                  { label: 'Strong Decline (>2m)', change: 2.5 },
+                  { label: 'Moderate Decline (1-2m)', change: 1.5 },
+                  { label: 'Slight Decline (0-1m)', change: 0.5 },
+                  { label: 'Slight Recovery (0 to -1m)', change: -0.5 },
+                  { label: 'Moderate Recovery (-1 to -2m)', change: -1.5 },
+                  { label: 'Strong Recovery (<-2m)', change: -2.5 }
+                ].map((item, idx) => {
+                  const getColor = (change: number) => {
+                    if (change > 2) return '#7F1D1D';
+                    if (change > 1) return '#DC2626';
+                    if (change > 0.5) return '#F87171';
+                    if (change > 0) return '#FCA5A5';
+                    if (change > -0.5) return '#BBF7D0';
+                    if (change > -1) return '#86EFAC';
+                    if (change > -2) return '#22C55E';
+                    return '#15803D';
+                  };
+                  return (
+                    <div key={idx} className="flex items-center gap-2">
+                      <div className="w-4 h-4 rounded" style={{ backgroundColor: getColor(item.change) }}></div>
+                      <span className="text-xs">{item.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* Summary Statistics Table */}
+          <div className="bg-gradient-to-r from-teal-50 to-green-50 p-4 rounded-lg border border-teal-200">
+            <h4 className="font-bold text-sm mb-3 text-teal-900">Grid Statistics</h4>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <div className="bg-white p-2 rounded border border-gray-200">
+                <div className="text-xs text-gray-600">Total Cells</div>
+                <div className="text-lg font-bold text-gray-800">{forecastData.count}</div>
+              </div>
+              <div className="bg-white p-2 rounded border border-gray-200">
+                <div className="text-xs text-gray-600">Median Change</div>
+                <div className={`text-lg font-bold ${forecastData.statistics.median_change_m > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                  {forecastData.statistics.median_change_m > 0 ? '+' : ''}{forecastData.statistics.median_change_m.toFixed(3)} m
                 </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {/* Summary Statistics Table */}
-      <div className="bg-gradient-to-r from-teal-50 to-green-50 p-4 rounded-lg border border-teal-200">
-        <h4 className="font-bold text-sm mb-3 text-teal-900">Grid Statistics</h4>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-          <div className="bg-white p-2 rounded border border-gray-200">
-            <div className="text-xs text-gray-600">Total Cells</div>
-            <div className="text-lg font-bold text-gray-800">{forecastData.count}</div>
-          </div>
-          <div className="bg-white p-2 rounded border border-gray-200">
-            <div className="text-xs text-gray-600">Median Change</div>
-            <div className={`text-lg font-bold ${forecastData.statistics.median_change_m > 0 ? 'text-red-600' : 'text-green-600'}`}>
-              {forecastData.statistics.median_change_m > 0 ? '+' : ''}{forecastData.statistics.median_change_m.toFixed(3)} m
+              </div>
+              <div className="bg-white p-2 rounded border border-gray-200">
+                <div className="text-xs text-gray-600">Decline/Recovery Ratio</div>
+                <div className="text-lg font-bold text-gray-800">
+                  {(forecastData.statistics.declining_cells / Math.max(forecastData.statistics.recovering_cells, 1)).toFixed(2)}
+                </div>
+              </div>
             </div>
           </div>
-          <div className="bg-white p-2 rounded border border-gray-200">
-            <div className="text-xs text-gray-600">Decline/Recovery Ratio</div>
-            <div className="text-lg font-bold text-gray-800">
-              {(forecastData.statistics.declining_cells / Math.max(forecastData.statistics.recovering_cells, 1)).toFixed(2)}
-            </div>
+
+          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <p className="text-sm text-blue-800">
+              <strong>ℹ️ What:</strong> Grid-based 12-month GWL forecast using neighbor-weighted wells + GRACE anomaly.
+              <br/><strong>How:</strong> KNN distance-weighted composite per cell → deseasonalize GWL + GRACE → OLS (trend + GRACE) → add back seasonality.
+              <br/><strong>Significance:</strong> Red cells = declining (deeper), Green = recovering (shallower). Assumes linear trend + stationary seasonality.
+              <br/><strong>⚠️ Note:</strong> This is a SPATIAL forecast (grid of points), not a TIME forecast (single location over time).
+            </p>
           </div>
         </div>
-      </div>
-
-      <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-        <p className="text-sm text-blue-800">
-          <strong>ℹ️ What:</strong> Grid-based 12-month GWL forecast using neighbor-weighted wells + GRACE anomaly.
-          <br/><strong>How:</strong> KNN distance-weighted composite per cell → deseasonalize GWL + GRACE → OLS (trend + GRACE) → add back seasonality.
-          <br/><strong>Significance:</strong> Red cells = declining (deeper), Green = recovering (shallower). Assumes linear trend + stationary seasonality.
-          <br/><strong>⚠️ Note:</strong> This is a SPATIAL forecast (grid of points), not a TIME forecast (single location over time).
-        </p>
-      </div>
-    </div>
-  );
-}
+      );
+    }
 
 if (selectedAdvancedModule === 'RECHARGE' && rechargeData) {
   return (
@@ -3143,9 +3580,10 @@ if (selectedAdvancedModule === 'RECHARGE' && rechargeData) {
 
             <Plot
               data={[
-                timeseriesResponse.timeseries.some(p => p.avg_gwl !== undefined) && {
-                  x: timeseriesResponse.timeseries.filter(p => p.avg_gwl !== undefined).map(p => p.date),
-                  y: timeseriesResponse.timeseries.filter(p => p.avg_gwl !== undefined).map(p => 
+                // 1. GWL Trace
+                timeseriesResponse.timeseries.length > 0 && {
+                  x: timeseriesResponse.timeseries.map(p => p.date),
+                  y: timeseriesResponse.timeseries.map(p => 
                     timeseriesView === 'raw' ? p.avg_gwl :
                     timeseriesView === 'seasonal' ? p.gwl_seasonal :
                     p.gwl_deseasonalized
@@ -3155,11 +3593,15 @@ if (selectedAdvancedModule === 'RECHARGE' && rechargeData) {
                   name: 'GWL (m bgl)',
                   line: { color: GWL_COLOR, width: 2 },
                   marker: { size: 6 },
+                  // Connect gaps if some seasonal data is missing at edges
+                  connectgaps: true, 
                   yaxis: 'y1'
                 },
-                timeseriesResponse.timeseries.some(p => p.avg_tws !== undefined) && {
-                  x: timeseriesResponse.timeseries.filter(p => p.avg_tws !== undefined).map(p => p.date),
-                  y: timeseriesResponse.timeseries.filter(p => p.avg_tws !== undefined).map(p => 
+                
+                // 2. GRACE Trace
+                timeseriesResponse.timeseries.length > 0 && {
+                  x: timeseriesResponse.timeseries.map(p => p.date),
+                  y: timeseriesResponse.timeseries.map(p => 
                     timeseriesView === 'raw' ? p.avg_tws :
                     timeseriesView === 'seasonal' ? p.grace_seasonal :
                     p.grace_deseasonalized
@@ -3169,16 +3611,19 @@ if (selectedAdvancedModule === 'RECHARGE' && rechargeData) {
                   name: 'GRACE TWS (cm)',
                   line: { color: GRACE_COLOR, width: 2 },
                   marker: { size: 6 },
+                  connectgaps: true,
                   yaxis: 'y2'
                 },
-                timeseriesResponse.timeseries.some(p => p.avg_rainfall !== undefined) && {
-                  x: timeseriesResponse.timeseries.filter(p => p.avg_rainfall !== undefined).map(p => p.date),
-                  y: timeseriesResponse.timeseries.filter(p => p.avg_rainfall !== undefined).map(p => 
+
+                // 3. Rainfall Trace
+                timeseriesResponse.timeseries.length > 0 && {
+                  x: timeseriesResponse.timeseries.map(p => p.date),
+                  y: timeseriesResponse.timeseries.map(p => 
                     timeseriesView === 'raw' ? p.avg_rainfall :
                     timeseriesView === 'seasonal' ? p.rainfall_seasonal :
                     p.rainfall_deseasonalized
                   ),
-                  type: 'bar',
+                  type: 'bar', // Or 'line' for seasonal view if preferred
                   name: 'Rainfall (mm/day)',
                   marker: { color: RAIN_COLOR, opacity: 0.6 },
                   yaxis: 'y3'
@@ -3292,9 +3737,11 @@ if (selectedAdvancedModule === 'RECHARGE' && rechargeData) {
 
           {chatMessages.length === 1 && (
             <div className="px-4 py-2 border-t border-gray-200">
-              <div className="text-xs font-semibold text-gray-600 mb-2">Try asking:</div>
-              <div className="space-y-1">
-                {suggestedQuestions.map((q, idx) => (
+              <div className="text-xs font-semibold text-gray-600 mb-2">
+                {selectedAdvancedModule ? `💡 Ask about ${selectedAdvancedModule}:` : '💡 Try asking:'}
+              </div>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {getSuggestedQuestions().map((q, idx) => (
                   <button
                     key={idx}
                     onClick={() => setChatInput(q)}
