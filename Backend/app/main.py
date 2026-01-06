@@ -36,7 +36,10 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import pickle
 import base64
-
+from typing import Optional, List, Any # Updated imports
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+import httpx
 # Optional dependencies
 try:
     import ruptures as rpt
@@ -147,94 +150,176 @@ async def start_cache_cleanup():
 # ============= CHATBOT SETUP =============
 CHATBOT_ENABLED = False
 chatbot_chain = None
+contextualize_q_chain = None
+qa_chain = None
 
-if CHATBOT_AVAILABLE:
-    print("🤖 Initializing Chatbot...")
-    try:
-        embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        chroma_client = chromadb.PersistentClient(path="/dashboard/chroma_db")
-        
-        vector_store_analysis = Chroma(
-            client=chroma_client,
-            collection_name="analysis_collection",
-            embedding_function=embedding_function,
-        )
-        vector_store_definitions = Chroma(
-            client=chroma_client,
-            collection_name="definitions_collection",
-            embedding_function=embedding_function,
-        )
-        
-        llama_model = ChatOllama(
-            model="llama3.1:8b",
-            temperature=0.3,
-            stop=["\n\nHuman:", "\n\nUser:", "```", "\n\n---", "\n0", "\n1"]
-        )
-        
-        def retrieve_context_fn(query: str):
-            docs1 = vector_store_definitions.similarity_search(query, k=2)
-            docs2 = vector_store_analysis.similarity_search(query, k=2)
-            docs = docs1 + docs2
-            return "\n\n".join(
-                (f"Source: {doc.metadata}\nContent: {doc.page_content}")
-                for doc in docs
-            )
-
-        retrieve_context = RunnableLambda(lambda x: retrieve_context_fn(x["question"]))
-
-        prompt = PromptTemplate(
-            template="""
-You are a Groundwater and Satellite-based Remote Sensing domain expert specializing in Indian hydrogeology.
-
-CURRENT MAP DISPLAY(if explicitly asked about the map ):
-{map_context}
-
-RETRIEVED KNOWLEDGE (use only if needed):
-{context}
-
-USER QUESTION:
-{question}
-
-Instructions:
-- If question uses map-reference words ("this", "here", "current", "showing", "visible", "pattern", "displayed") → analyze map data with specific values
-- If question is general ("what is", "explain", "define", "tell me about") → give educational answer using retrieved knowledge, IGNORE map context
-  * For map analysis: Provide comprehensive analysis (150-400 words)
-  * Include specific numbers, trends, comparisons, and actionable insights
-  * Reference the actual data values shown in the map context
-  * Explain what the patterns mean for groundwater management
-- If the user asks for definitions/concepts (like "what is", "explain", "define") → give brief educational answer (2-3 sentences, 50-100 words)
-- If map data is present but question is ambiguous → prioritize analyzing the visible data with detailed explanation
-- Use retrieved knowledge only for technical terms or additional context
-- Keep responses India-centric
-- Be direct - no preamble or meta-commentary
-- Never add trailing numbers or artifacts
-
-Answer directly:
-""")
-
-        chatbot_chain = RunnableMap({
-            "question": lambda x: x["question"],
-            "map_context": lambda x: str(x.get("map_context") or "No map data currently displayed"),
-            "context": retrieve_context
-        }) | prompt | llama_model
-        
-        CHATBOT_ENABLED = True
-        print("✅ Chatbot initialized successfully!")
-        
-    except Exception as e:
-        CHATBOT_ENABLED = False
-        print(f"⚠️  Chatbot initialization failed: {e}")
-        print("   API will continue without chatbot functionality")
-else:
-    print("⚠️  Chatbot dependencies not installed. Chatbot disabled.")
+class Message(BaseModel):
+    role: str
+    content: str
 
 class ChatRequest(BaseModel):
     question: str
     map_context: Optional[dict] = None
+    chat_history: List[Message] = [] 
 
 class ChatResponse(BaseModel):
     answer: str
     sources_used: int
+
+if CHATBOT_AVAILABLE:
+    print("🤖 Initializing Context-Aware Chatbot...")
+    try:
+        # 1. Setup Embeddings
+        embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        chroma_client = chromadb.PersistentClient(path="/dashboard/chroma_db")
+        
+        # 2. Load Collections
+        # Analysis Collection (If used for other docs)
+        try:
+            vector_store_analysis = Chroma(
+                client=chroma_client, 
+                collection_name="analysis_collection", 
+                embedding_function=embedding_function
+            )
+        except: vector_store_analysis = None
+
+        # Definitions Collection (Static Knowledge)
+        try:
+            vector_store_definitions = Chroma(
+                client=chroma_client, 
+                collection_name="definitions_collection", 
+                embedding_function=embedding_function
+            )
+        except: vector_store_definitions = None
+
+        # ✅ NEW: Reports Collection (Your 2024 Report Data)
+        vector_store_reports = Chroma(
+            client=chroma_client, 
+            collection_name="reports_collection", 
+            embedding_function=embedding_function
+        )
+        
+        llm = ChatOllama(
+            model="llama3.1:8b",
+            temperature=0.2,
+            keep_alive="5m"
+        )
+
+        # 3. Step A: Contextualize Question Chain (Rewriter)
+        contextualize_q_system_prompt = """You are helping reformulate user questions for a technical hydrogeology Q&A system.
+
+            MOST IMPORTANT RULE: If the question is already clear and standalone, return it EXACTLY as-is. Do not add extra context.
+
+            Your task: ONLY reformulate if the question has pronouns like "it", "this", "that" or references like "the previous" that need clarification.
+
+            CRITICAL RULES:
+            1. **Check First**: Does this question need reformulation? If no pronouns/references → return original
+            2. **Preserve Everything**: Keep exact wording, question type, depth level
+            3. **Only Add What's Missing**: If "it" → replace with specific topic from history. Nothing more.
+            4. **Don't Hallucinate**: Never add topics not in the original question
+
+            Examples:
+            ❌ BAD:
+            User: "what about the rainfall trend and gwl trend"
+            Rewritten: "Explain in detail how the GRACE satellite data trend analysis..." (WRONG - added GRACE, added "explain in detail")
+
+            ✅ GOOD:
+            User: "what about the rainfall trend and gwl trend" [Context: discussing Kerala]
+            Rewritten: "What about the rainfall trend and GWL trend in Kerala?" (Just added location)
+
+            ❌ BAD:
+            User: "how does it work?"
+            Rewritten: "Explain the complete methodology of groundwater analysis" (WRONG - changed question type and scope)
+
+            ✅ GOOD:
+            User: "how does it work?" [Context: GRACE data]
+            Rewritten: "How does GRACE data work?"
+
+            Now reformulate this question:"""
+
+        contextualize_q_prompt = PromptTemplate(
+            template=contextualize_q_system_prompt + "\n\nChat History:\n{chat_history}\n\nUser Question: {question}\n\nStandalone Question:",
+            input_variables=["chat_history", "question"]
+        )
+
+        contextualize_q_chain = contextualize_q_prompt | llm | StrOutputParser()
+
+        # 4. Retrieval Function
+        def retrieve_documents(query: str, state: str = None, district: str = None):
+            """
+            Retrieves documents by 'injecting' the location into the search query.
+            This forces the vector DB to prioritize chunks that mention this specific region.
+            """
+            
+            # 1. Construct the "Expanded Query"
+            search_query = query
+            
+            # If we know the location, append it to the search string
+            # This acts like a soft filter because chunks mentioning 'Kerala' will have higher cosine similarity
+            location_context = ""
+            if district and state:
+                location_context = f" in {district}, {state}"
+            elif state:
+                location_context = f" in {state}"
+                
+            full_search_query = f"{query}{location_context}"
+            
+            print(f"🔍 Searching RAG for: '{full_search_query}'") 
+            
+            all_docs = []
+
+            # 2. Search Definitions (Keep original query for generic terms)
+            if vector_store_definitions:
+                # Definitions don't care about location, so use the original short query
+                all_docs.extend(vector_store_definitions.similarity_search(query, k=1))
+
+            # 3. Search Reports (Use the EXPANDED query)
+            try:
+                # We search for "aquifer properties in Kerala" instead of just "aquifer properties"
+                report_docs = vector_store_reports.similarity_search(full_search_query, k=3)
+                all_docs.extend(report_docs)
+            except Exception as e:
+                print(f"⚠️ Vector search failed: {e}")
+
+            return "\n\n".join([d.page_content for d in all_docs])
+
+        # 5. Step B: QA Chain (The Answerer)
+# 5. Step B: QA Chain (The Answerer)
+        qa_system_prompt = """You are an expert Hydrogeologist for the GeoHydro platform.
+
+        You have access to:
+        1. **LIVE DASHBOARD STATISTICS:** Complete analytics from the user's current map view (aquifers, wells, GRACE, rainfall, and all 10 advanced modules). These numbers are EXACT and come directly from what the user sees on screen.
+        2. **KNOWLEDGE BASE:** Scientific reports and definitions from the vector database.only use this to support your answers.
+
+        CRITICAL INSTRUCTIONS:
+        - **Use Provided Stats:** The map_context contains pre-calculated statistics for EVERYTHING the user can see. Never say "I need to analyze" - the analysis is already done!
+        - **Be Specific:** Use exact numbers from the context. Example: "Mean SASS score is 2.4" (not "the stress is moderate")
+        - **Explain Methodology:** When asked "how", reference the methodology sections in the context
+        - **Handle Missing Data:** If a module shows no data, explain that the analysis isn't available for this specific region/timeframe
+        - **Location-Aware:** Always mention the specific district/state being analyzed
+        - **Interpret Numbers:** Combine the statistics with your hydrogeological expertise to give meaningful insights
+
+        **DASHBOARD CONTEXT (Live Data):**
+        {map_context}
+
+        **KNOWLEDGE BASE (Static Reference):**
+        {context}
+        """
+
+        qa_prompt = PromptTemplate(
+            template=qa_system_prompt + "\nUSER QUESTION: {question}",
+            input_variables=["map_context", "context", "question"]
+        )
+
+        qa_chain = qa_prompt | llm | StrOutputParser()
+
+        CHATBOT_ENABLED = True
+        print("✅ Context-Aware Chatbot initialized successfully!")
+
+    except Exception as e:
+        CHATBOT_ENABLED = False
+        print(f"⚠️ Chatbot initialization failed: {e}")
+
 
 # =============================================================================
 # GRACE BAND MAPPING
@@ -310,7 +395,127 @@ detect_rainfall_tables()
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
+RESOURCE_TO_MCM_FACTOR = 1.0
 
+def get_gwr_for_year(
+    year: int,
+    boundary_geojson: str = None
+) -> pd.DataFrame:
+    """
+    Query GWR data for a specific year from database
+    Returns DataFrame with district, state, annual_resource, geometry
+    
+    Currently supports: 2017 only (expandable)
+    """
+    
+    # ✅ Validate year
+    if year not in AVAILABLE_GWR_YEARS:
+        print(f"WARNING: No GWR data for year {year}. Available: {AVAILABLE_GWR_YEARS}")
+        return pd.DataFrame()
+    
+    # ✅ Get correct table name
+    table_name = get_gwr_table_for_year(year)
+    
+    where_clause = ""
+    params = {}
+    
+    if boundary_geojson:
+        where_clause = """
+            AND ST_Intersects(
+                ST_MakeValid(geometry),
+                ST_GeomFromGeoJSON(:boundary_geojson)
+            )
+        """
+        params["boundary_geojson"] = boundary_geojson
+    
+    # ✅ Query with dynamic table name
+    query = text(f"""
+        SELECT 
+            "District" as district,
+            "state" as state,
+            "Annual_Replenishable_Groundwater_Resource" as annual_resource,
+            ST_AsGeoJSON(ST_MakeValid(geometry)) as geometry,
+            ST_Area(ST_Transform(ST_MakeValid(geometry), 32643)) as area_m2
+        FROM {table_name}
+        WHERE "Annual_Replenishable_Groundwater_Resource" IS NOT NULL
+        {where_clause}
+    """)
+    
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(query, params)
+            
+            records = []
+            for row in result:
+                try:
+                    geom_json = json.loads(row[3])
+                    
+                    # Parse annual resource value
+                    annual_resource = float(row[2]) if row[2] is not None else 0.0
+                    
+                    records.append({
+                        "district": row[0],
+                        "state": row[1],
+                        "annual_resource_mcm": annual_resource * RESOURCE_TO_MCM_FACTOR,  # ✅ NEW
+                        "area_m2": float(row[4]) if row[4] else 0.0,
+                        "geometry": geom_json
+                    })
+                except Exception as e:
+                    print(f"Error parsing GWR row: {e}")
+                    continue
+            
+            return pd.DataFrame(records)
+    
+    except Exception as e:
+        print(f"Error querying GWR for year {year}: {e}")
+        return pd.DataFrame()
+
+
+def clip_gwr_to_boundary(
+    gwr_df: pd.DataFrame,
+    boundary_geojson: str
+) -> pd.DataFrame:
+    """
+    Clip GWR polygons to boundary (matching Dash's robust_clip_to_boundary logic)
+    """
+    if gwr_df.empty or not boundary_geojson:
+        return gwr_df
+    
+    try:
+        boundary_geom = shape(json.loads(boundary_geojson))
+        prepared_boundary = prep(boundary_geom)
+        
+        clipped_records = []
+        
+        for idx, row in gwr_df.iterrows():
+            try:
+                # Get original geometry
+                gwr_geom = shape(row['geometry'])
+                
+                # Check if it intersects
+                if prepared_boundary.intersects(gwr_geom):
+                    # Clip to boundary
+                    clipped_geom = gwr_geom.intersection(boundary_geom)
+                    
+                    # Skip if empty after clipping
+                    if clipped_geom.is_empty:
+                        continue
+                    
+                    # Update geometry
+                    clipped_row = row.copy()
+                    clipped_row['geometry'] = clipped_geom.__geo_interface__
+                    clipped_records.append(clipped_row)
+            
+            except Exception as e:
+                print(f"Error clipping GWR polygon: {e}")
+                continue
+        
+        return pd.DataFrame(clipped_records)
+    
+    except Exception as e:
+        print(f"Error in clip_gwr_to_boundary: {e}")
+        return gwr_df
+    
 def day_of_year(year: int, month: int, day: int) -> int:
     return datetime(year, month, day).timetuple().tm_yday
 
@@ -891,7 +1096,78 @@ def query_rainfall_monthly(boundary_geojson: str = None):
     
     print(f"  ✓ Rainfall (fresh): {len(df)} months retrieved")
     return df
+def build_location_context(state: str, district: str) -> str:
+    """
+    Fetches real-time statistics from the SQL DB and formats them 
+    into a text summary for the LLM.
+    """
+    print(f"🤖 Hydrating context for: {district}, {state}")
+    parts = [f"**CURRENT LOCATION:** District: {district}, State: {state}"]
+    
+    try:
+        # 1. Get Groundwater Summary (Using your existing logic)
+        # We assume get_boundary_geojson is available
+        boundary = get_boundary_geojson(state, district)
+        
+        # We call the logic that powers get_wells_summary manually
+        # (Re-using the logic from your get_wells_summary endpoint)
+        summary_data = get_wells_summary(state=state, district=district)
+        
+        if "statistics" in summary_data and summary_data["statistics"]:
+            stats = summary_data["statistics"]
+            trend = summary_data.get("trend", {})
+            
+            parts.append("\n**GROUNDWATER LEVEL (GWL) STATUS:**")
+            parts.append(f"- Average GWL: {stats.get('mean_gwl', 'N/A')} meters below ground level (mbgl)")
+            parts.append(f"- Fluctuation: {stats.get('std_gwl', 'N/A')} meters (Standard Deviation)")
+            parts.append(f"- Long-term Trend: {trend.get('trend_direction', 'Unknown')} ({trend.get('slope_m_per_year', 0)} m/year)")
+            parts.append(f"- Trend Significance: {trend.get('significance', 'Unknown')}")
 
+        # 2. Get Aquifer Info (Using your existing get_aquifer_properties)
+        # Note: We need to handle the fact that get_aquifer_properties returns a DataFrame
+        aquifer_df = get_aquifer_properties(boundary)
+        
+        if not aquifer_df.empty:
+            parts.append("\n**AQUIFER GEOLOGY:**")
+            if 'majoraquif' in aquifer_df.columns:
+                dom_aquifer = aquifer_df['majoraquif'].mode()[0]
+                parts.append(f"- Dominant Aquifer: {dom_aquifer}")
+            if 'yield' in aquifer_df.columns:
+                 # Clean up yield string if possible
+                avg_yield = aquifer_df['yield'].iloc[0]
+                parts.append(f"- Yield Potential: {avg_yield}")
+            if 'area_m2' in aquifer_df.columns:
+                 total_area = aquifer_df['area_m2'].sum() / 1_000_000 # Convert to sq km
+                 parts.append(f"- Aquifer Area: {round(total_area, 2)} sq km")
+
+    except Exception as e:
+        print(f"⚠️ Context build error: {e}")
+        parts.append("\n(Note: Some real-time statistical data could not be retrieved from the database.)")
+
+    return "\n".join(parts)
+
+AVAILABLE_GWR_YEARS = [2017]  # ← Add new years here when you get them
+def get_available_gwr_years():
+    """Returns list of years with GWR data available"""
+    return AVAILABLE_GWR_YEARS
+
+# Year-to-table mapping (for future multi-year support)
+GWR_TABLE_MAP = {
+    2017: "ground_water_resource_sod_dt_2017"
+    # Future: 2020: "ground_water_resource_sod_dt_2020"
+}
+
+def get_gwr_table_for_year(year: int) -> str:
+    """Get table name for a specific year"""
+    if year not in GWR_TABLE_MAP:
+        raise ValueError(f"No GWR data for year {year}")
+    return GWR_TABLE_MAP[year]
+
+def get_gwr_table_for_year(year: int) -> str:
+    """Get table name for a specific year"""
+    if year not in GWR_TABLE_MAP:
+        raise ValueError(f"No GWR data for year {year}. Available: {AVAILABLE_GWR_YEARS}")
+    return GWR_TABLE_MAP[year]
 # =============================================================================
 # ROOT ENDPOINT
 # =============================================================================
@@ -926,6 +1202,13 @@ def root():
                 "GET /api/wells/summary - Regional statistics",
                 "GET /api/wells/storage - Pre/post-monsoon storage",
                 "GET /api/wells/years - Available year range (dynamic)"
+            ],
+            "gwr": [
+                "GET /api/gwr/available-years - Get years with GWR data",  # ← ADD THIS
+                "GET /api/gwr - Get GWR data for specific year",
+                "GET /api/gwr/timeseries - GWR time series",
+                "GET /api/gwr/summary - Comprehensive GWR summary",
+                "GET /api/wells/storage-vs-gwr - Storage vs GWR comparison"
             ],
             "grace": [
                 "GET /api/grace/available - Available GRACE months",
@@ -1112,41 +1395,104 @@ async def debug_raster_info(
 
 # =============================================================================
 # CHATBOT ENDPOINT
-# =============================================================================
+# ============================================================================
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    """
+    Context-aware chatbot that uses frontend-provided map context
+    No backend tool calls needed - frontend sends enriched statistics
+    """
     if not CHATBOT_ENABLED:
-        raise HTTPException(
-            status_code=503, 
-            detail="Chatbot is not available. Please check if ChromaDB and LLaMA are properly configured."
-        )
+        raise HTTPException(status_code=503, detail="Chatbot unavailable")
     
     try:
-        context = retrieve_context_fn(request.question)
-        sources_count = len(context.split("Source:")) - 1
+        # ═══════════════════════════════════════════════════════════════
+        # EXTRACT LOCATION FROM CONTEXT
+        # ═══════════════════════════════════════════════════════════════
+        state = None
+        district = None
         
-        result = chatbot_chain.invoke({
-            "question": request.question,
-            "map_context": request.map_context or {}
+        if request.map_context and isinstance(request.map_context, dict):
+            if "state" in request.map_context:
+                state = request.map_context.get("state")
+                district = request.map_context.get("district")
+            elif "region" in request.map_context:
+                state = request.map_context["region"].get("state")
+                district = request.map_context["region"].get("district")
+        
+        print(f"🗺️  Location: {district or 'All'}, {state or 'India'}")
+        
+        # ═══════════════════════════════════════════════════════════════
+        # FORMAT MAP CONTEXT (Frontend already provides rich stats)
+        # ═══════════════════════════════════════════════════════════════
+        frontend_context_str = json.dumps(request.map_context, indent=2) if request.map_context else "No map context provided"
+        
+        full_map_context = f"""
+**LIVE DASHBOARD CONTEXT:**
+The user is viewing the GeoHydro dashboard for: {district or 'All Districts'}, {state or 'All India'}
+
+**Current View Statistics:**
+{frontend_context_str}
+
+**IMPORTANT:** 
+- All statistics above are LIVE from the current map view
+- Use these exact numbers when answering - they reflect what the user sees
+- If a module shows "No data", tell the user that specific analysis isn't available for this region
+""".strip()
+        
+        # ═══════════════════════════════════════════════════════════════
+        # FORMAT CHAT HISTORY
+        # ═══════════════════════════════════════════════════════════════
+        history_text = "\n".join([
+            f"{msg.role}: {msg.content}" 
+            for msg in request.chat_history
+        ])
+        
+        # ═══════════════════════════════════════════════════════════════
+        # QUERY REWRITING (Contextualize standalone question)
+        # ═══════════════════════════════════════════════════════════════
+        if request.chat_history:
+            standalone_question = contextualize_q_chain.invoke({
+                "chat_history": history_text,
+                "question": request.question
+            })
+            print(f"🔄 Rewrote: '{request.question}' → '{standalone_question}'")
+        else:
+            standalone_question = request.question
+        
+        # ═══════════════════════════════════════════════════════════════
+        # RETRIEVAL (Vector DB for static knowledge)
+        # ═══════════════════════════════════════════════════════════════
+        search_query = f"{standalone_question} in {district}, {state}" if (district and state) else standalone_question
+        
+        retrieved_docs = retrieve_documents(search_query, state, district)
+        sources_count = len(retrieved_docs.split("Source:")) - 1
+        
+        print(f"📚 Retrieved {sources_count} knowledge sources")
+        
+        # ═══════════════════════════════════════════════════════════════
+        # GENERATE ANSWER
+        # ═══════════════════════════════════════════════════════════════
+        answer = qa_chain.invoke({
+            "map_context": full_map_context,  # ✅ Frontend-provided stats
+            "context": retrieved_docs,         # ✅ Vector DB knowledge
+            "question": standalone_question 
         })
         
-        answer = result.content.strip()
+        print(f"✅ Answer generated ({len(answer)} chars)")
         
-        while answer and answer[-1].isdigit() and (len(answer) < 2 or not answer[-2].isdigit()):
-            answer = answer[:-1].strip()
-        
-        answer = answer.rstrip('.,;: ')
-        
+        # ═══════════════════════════════════════════════════════════════
+        # RETURN RESPONSE
+        # ═══════════════════════════════════════════════════════════════
         return ChatResponse(
-            answer=answer,
+            answer=answer.strip(),
             sources_used=sources_count
         )
     
     except Exception as e:
-        print(f"Chatbot error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
-
+        print(f"❌ Chat error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
 # =============================================================================
 # GEOGRAPHY ENDPOINTS
 # =============================================================================
@@ -1199,6 +1545,238 @@ def get_districts(state_name: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/gwr/available-years")
+def get_gwr_available_years():
+    """Get all years with GWR data available"""
+    try:
+        years = get_available_gwr_years()
+        
+        if not years:
+            return {
+                "status": "error",
+                "message": "No GWR data found in database",
+                "years": []
+            }
+        
+        return {
+            "status": "success",
+            "min_year": min(years),
+            "max_year": max(years),
+            "total_years": len(years),
+            "years": years
+        }
+    
+    except Exception as e:
+        print(f"GWR years error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gwr")
+def get_gwr_data(
+    year: int = Query(2017, ge=2017, le=2030, description="Year for GWR data"),
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    clip_to_boundary: bool = Query(True, description="Clip polygons to exact boundary")
+):
+    """
+    Get Ground Water Resource (GWR) data for a specific year
+    
+    Currently available: 2017 only
+    Returns GeoJSON with annual replenishable groundwater resource (MCM) per polygon
+    """
+    
+    if year not in AVAILABLE_GWR_YEARS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"GWR data not available for {year}. Available years: {AVAILABLE_GWR_YEARS}"
+        )
+    
+    try:
+        # Get boundary
+        boundary_geojson = None
+        if state or district:
+            boundary_geojson = get_boundary_geojson(state, district)
+            if not boundary_geojson:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Boundary not found for state={state}, district={district}"
+                )
+        
+        # Query GWR data
+        gwr_df = get_gwr_for_year(year, boundary_geojson)
+        
+        # ✅ CHECK IF EMPTY FIRST (before calculating zmin/zmax)
+        if gwr_df.empty:
+            return {
+                "data_type": "gwr",
+                "year": year,
+                "filters": {"state": state, "district": district},
+                "status": "no_data",
+                "message": f"No GWR data found for year {year}",
+                "count": 0,
+                "total_resource_mcm": 0,
+                "geojson": {
+                    "type": "FeatureCollection",
+                    "features": []
+                }
+            }
+        
+        # ✅ NOW SAFE TO CALCULATE (gwr_df is not empty)
+        zmin = float(gwr_df["annual_resource_mcm"].min())
+        zmax = float(gwr_df["annual_resource_mcm"].max())
+        
+        # Handle edge case where all values are the same
+        if zmax - zmin < 0.001:
+            zmin = zmin - 0.1 * abs(zmin) if zmin != 0 else 0
+            zmax = zmax + 0.1 * abs(zmax) if zmax != 0 else 1
+        
+        # Optionally clip to exact boundary (like Dash does)
+        if clip_to_boundary and boundary_geojson:
+            gwr_df = clip_gwr_to_boundary(gwr_df, boundary_geojson)
+        
+        # Build GeoJSON
+        features = []
+        for idx, row in gwr_df.iterrows():
+            features.append({
+                "type": "Feature",
+                "id": str(idx),
+                "properties": {
+                    "district": row["district"],
+                    "state": row["state"],
+                    "annual_resource_mcm": round(float(row["annual_resource_mcm"]), 2),
+                    "area_m2": float(row["area_m2"])
+                },
+                "geometry": row["geometry"]
+            })
+        
+        geojson_data = {
+            "type": "FeatureCollection",
+            "features": features
+        }
+        
+        # Calculate statistics
+        total_resource = gwr_df["annual_resource_mcm"].sum()
+        
+        # ✅ NOW ALL VARIABLES EXIST - RETURN RESPONSE
+        return {
+            "data_type": "gwr",
+            "year": year,
+            "filters": {
+                "state": state,
+                "district": district,
+                "clip_to_boundary": clip_to_boundary
+            },
+            "status": "success",
+            "statistics": {
+                "total_resource_mcm": round(float(total_resource), 2),
+                "mean_resource_mcm": round(float(gwr_df["annual_resource_mcm"].mean()), 2),
+                "min_resource_mcm": round(zmin, 2),
+                "max_resource_mcm": round(zmax, 2),
+                "num_districts": int(gwr_df["district"].nunique()),
+                "total_area_km2": round(float(gwr_df["area_m2"].sum()) / 1_000_000, 2),
+                # ✅ ADD COLOR RANGE FOR FRONTEND NORMALIZATION
+                "color_range": {
+                    "zmin": round(zmin, 2),
+                    "zmax": round(zmax, 2)
+                }
+            },
+            "count": len(features),
+            "geojson": geojson_data
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"GWR Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gwr/timeseries")
+def get_gwr_timeseries(
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None)
+):
+    """
+    Get GWR time series for all available years
+    """
+    try:
+        # Get boundary
+        boundary_geojson = None
+        if state or district:
+            boundary_geojson = get_boundary_geojson(state, district)
+            if not boundary_geojson:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Boundary not found for state={state}, district={district}"
+                )
+        
+        # ✅ Get available years dynamically
+        available_years = get_available_gwr_years()
+        
+        if not available_years:
+            raise HTTPException(status_code=404, detail="No GWR data available")
+        
+        # Query each year
+        timeseries_data = []
+        
+        for year in available_years:
+            gwr_df = get_gwr_for_year(year, boundary_geojson)
+            
+            if not gwr_df.empty:
+                # Sum total resource for the year
+                total_resource = gwr_df["annual_resource_mcm"].sum()
+                
+                if pd.notna(total_resource) and total_resource > 0:
+                    timeseries_data.append({
+                        "year": int(year),
+                        "annual_resource_mcm": round(float(total_resource), 2),
+                        "num_districts": int(gwr_df["district"].nunique())
+                    })
+        
+        if not timeseries_data:
+            return {
+                "data_type": "gwr_timeseries",
+                "filters": {"state": state, "district": district},
+                "count": 0,
+                "data": [],
+                "message": "No GWR data in selected region"
+            }
+        
+        # Sort by year
+        timeseries_data.sort(key=lambda x: x["year"])
+        
+        # Calculate statistics
+        resources = [d["annual_resource_mcm"] for d in timeseries_data]
+        
+        return {
+            "data_type": "gwr_timeseries",
+            "filters": {"state": state, "district": district},
+            "statistics": {
+                "mean_annual_resource_mcm": round(float(np.mean(resources)), 2),
+                "total_years": len(timeseries_data),
+                "year_range": {
+                    "min": min(d["year"] for d in timeseries_data),
+                    "max": max(d["year"] for d in timeseries_data)
+                }
+            },
+            "count": len(timeseries_data),
+            "data": timeseries_data
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"GWR Timeseries Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def get_gwr_table_for_year(year: int) -> str:
+    """Get table name for a specific year"""
+    if year not in GWR_TABLE_MAP:
+        raise ValueError(f"No GWR data for year {year}. Available: {AVAILABLE_GWR_YEARS}")
+    return GWR_TABLE_MAP[year]
+
 
 @app.get("/api/district/{state_name}/{district_name}")
 def get_district(state_name: str, district_name: str):
@@ -1982,101 +2560,121 @@ def get_wells_summary(
         print(f"Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/wells/storage")
-def get_wells_storage(
+@app.get("/api/wells/storage-vs-gwr")
+def get_storage_vs_gwr(
     state: Optional[str] = Query(None),
     district: Optional[str] = Query(None),
     start_year: Optional[int] = Query(None),
     end_year: Optional[int] = Query(None)
 ):
-    
-    boundary_geojson = get_boundary_geojson(state, district) if (state or district) else None
-    
-    where_clause = ""
-    params = {}
-    
-    if boundary_geojson:
-        where_clause = """
-            WHERE ST_Intersects(
-                ST_GeomFromGeoJSON(:boundary_geojson),
-                ST_SetSRID(ST_MakePoint(
-                    COALESCE(NULLIF("LON", 0), "LONGITUD_1"),
-                    COALESCE(NULLIF("LAT", 0), "LATITUDE_1")
-                ), 4326)
-            )
-        """
-        params["boundary_geojson"] = boundary_geojson
-    
-    where_aquifer = "WHERE ST_Intersects(ST_MakeValid(geometry), ST_GeomFromGeoJSON(:boundary_geojson))" if boundary_geojson else ""
-    aquifer_query = text(f"""
-        SELECT 
-            ST_Area(ST_Transform(ST_MakeValid(geometry), 32643)) as area_m2,
-            yeild__
-        FROM major_aquifers
-        {where_aquifer}
-    """)
-
+    """
+    Enhanced storage analysis that includes GWR comparison
+    Matches the Dash code's storage plot with GWR overlay
+    """
     try:
+        boundary_geojson = get_boundary_geojson(state, district) if (state or district) else None
+        
+        # === 1. GET AQUIFER PROPERTIES FOR SPECIFIC YIELD ===
+        where_aquifer = ""
+        params = {}
+        
+        if boundary_geojson:
+            where_aquifer = "WHERE ST_Intersects(ST_MakeValid(geometry), ST_GeomFromGeoJSON(:boundary_geojson))"
+            params["boundary_geojson"] = boundary_geojson
+        
+        aquifer_query = text(f"""
+            SELECT 
+                ST_Area(ST_Transform(ST_MakeValid(geometry), 32643)) as area_m2,
+                yeild__
+            FROM major_aquifers
+            {where_aquifer}
+        """)
+        
+        total_area_m2 = 0.0
+        weighted_sy_sum = 0.0
+        
         with engine.connect() as conn:
             result = conn.execute(aquifer_query, params if boundary_geojson else {})
-            
-            total_area_m2 = 0.0
-            weighted_sy_sum = 0.0
             
             for row in result:
                 area = float(row[0]) if row[0] else 0
                 yield_str = str(row[1]).lower() if row[1] else ""
                 
-                sy = 0.05
+                # Parse specific yield from yield string
+                sy = 0.05  # Default
                 try:
                     import re
                     numbers = re.findall(r'\d+\.?\d*', yield_str)
                     if numbers:
                         vals = [float(n) for n in numbers]
-                        sy = sum(vals) / len(vals) / 100.0
+                        sy = sum(vals) / len(vals) / 100.0  # Convert percentage to decimal
                 except:
                     sy = 0.05
                 
                 total_area_m2 += area
                 weighted_sy_sum += (area * sy)
-            
-            if total_area_m2 == 0:
-                return {"error": "No aquifer data available for this region"}
-            
-            specific_yield = weighted_sy_sum / total_area_m2
-            
-            year_filter_start = 'AND EXTRACT(YEAR FROM "Date") >= :start_year' if start_year else ""
-            year_filter_end = 'AND EXTRACT(YEAR FROM "Date") <= :end_year' if end_year else ""
-
-            storage_query = text(f"""
-                SELECT 
-                    EXTRACT(YEAR FROM "Date") as year,
-                    AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (4,5,6) THEN "GWL" END) as pre_gwl,
-                    AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (10,11,12) THEN "GWL" END) as post_gwl
-                FROM groundwater_level
-                {where_clause}
-                AND "GWL" IS NOT NULL
-                {year_filter_start}
-                {year_filter_end}
-                GROUP BY EXTRACT(YEAR FROM "Date")
-                HAVING AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (4,5,6) THEN "GWL" END) IS NOT NULL
-                AND AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (10,11,12) THEN "GWL" END) IS NOT NULL
-                ORDER BY year;
-            """)
-            
-            if start_year:
-                params["start_year"] = start_year
-            if end_year:
-                params["end_year"] = end_year
-            
+        
+        if total_area_m2 == 0:
+            return {
+                "data_type": "storage_vs_gwr",
+                "filters": {"state": state, "district": district},
+                "status": "error",
+                "message": "No aquifer data available for this region",
+                "statistics": {},
+                "count": 0,
+                "data": []
+            }
+        
+        specific_yield = weighted_sy_sum / total_area_m2
+        
+        # === 2. CALCULATE STORAGE FROM WELLS ===
+        where_wells = ""
+        if boundary_geojson:
+            where_wells = """
+                WHERE ST_Intersects(
+                    ST_GeomFromGeoJSON(:boundary_geojson),
+                    ST_SetSRID(ST_MakePoint(
+                        COALESCE(NULLIF("LON", 0), "LONGITUD_1"),
+                        COALESCE(NULLIF("LAT", 0), "LATITUDE_1")
+                    ), 4326)
+                )
+            """
+        
+        year_filter_start = 'AND EXTRACT(YEAR FROM "Date") >= :start_year' if start_year else ""
+        year_filter_end = 'AND EXTRACT(YEAR FROM "Date") <= :end_year' if end_year else ""
+        
+        storage_query = text(f"""
+            SELECT 
+                EXTRACT(YEAR FROM "Date") as year,
+                AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (4,5,6) THEN "GWL" END) as pre_gwl,
+                AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (10,11,12) THEN "GWL" END) as post_gwl
+            FROM groundwater_level
+            {where_wells}
+            AND "GWL" IS NOT NULL
+            {year_filter_start}
+            {year_filter_end}
+            GROUP BY EXTRACT(YEAR FROM "Date")
+            HAVING AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (4,5,6) THEN "GWL" END) IS NOT NULL
+            AND AVG(CASE WHEN EXTRACT(MONTH FROM "Date") IN (10,11,12) THEN "GWL" END) IS NOT NULL
+            ORDER BY year;
+        """)
+        
+        if start_year:
+            params["start_year"] = start_year
+        if end_year:
+            params["end_year"] = end_year
+        
+        storage_years = []
+        
+        with engine.connect() as conn:
             result = conn.execute(storage_query, params)
             
-            storage_years = []
             for row in result:
                 year = int(row[0])
                 pre_gwl = float(row[1])
                 post_gwl = float(row[2])
                 
+                # Storage calculation (positive = depletion, negative = recharge)
                 fluctuation_m = pre_gwl - post_gwl
                 storage_change_mcm = (fluctuation_m * total_area_m2 * specific_yield) / 1_000_000
                 
@@ -2087,30 +2685,106 @@ def get_wells_storage(
                     "fluctuation_m": round(fluctuation_m, 2),
                     "storage_change_mcm": round(storage_change_mcm, 2)
                 })
+        
+        # === 3. GET GWR DATA ===
+        available_gwr_years = get_available_gwr_years()
+        gwr_years = []
+        
+        for year in available_gwr_years:
+            # Apply year filters if provided
+            if start_year and year < start_year:
+                continue
+            if end_year and year > end_year:
+                continue
             
-            if not storage_years:
-                return {
-                    "error": "Insufficient seasonal data for storage calculation"
-                }
+            gwr_df = get_gwr_for_year(year, boundary_geojson)
             
-            avg_storage_change = np.mean([s["storage_change_mcm"] for s in storage_years])
+            if not gwr_df.empty:
+                # ✅ Apply conversion factor here
+                total_resource = gwr_df["annual_resource_mcm"].sum() * RESOURCE_TO_MCM_FACTOR
+                
+                if pd.notna(total_resource) and total_resource > 0:
+                    gwr_years.append({
+                        "year": int(year),
+                        "annual_resource_mcm": round(float(total_resource), 2)
+                    })
+        
+        # === 4. MERGE STORAGE AND GWR DATA ===
+        all_years = sorted(set(
+            [s["year"] for s in storage_years] + 
+            [g["year"] for g in gwr_years]
+        ))
+        
+        merged_data = []
+        
+        for year in all_years:
+            year_data = {"year": year}
             
-            return {
-                "filters": {"state": state, "district": district},
-                "aquifer_properties": {
-                    "total_area_km2": round(total_area_m2 / 1_000_000, 2),
-                    "area_weighted_specific_yield": round(specific_yield, 4)
-                },
-                "summary": {
-                    "avg_annual_storage_change_mcm": round(avg_storage_change, 2),
-                    "years_analyzed": len(storage_years)
-                },
-                "yearly_storage": storage_years
+            # Add storage data if available
+            storage_match = next((s for s in storage_years if s["year"] == year), None)
+            if storage_match:
+                year_data["storage_change_mcm"] = storage_match["storage_change_mcm"]
+                year_data["pre_monsoon_gwl"] = storage_match["pre_monsoon_gwl"]
+                year_data["post_monsoon_gwl"] = storage_match["post_monsoon_gwl"]
+            else:
+                year_data["storage_change_mcm"] = None
+                year_data["pre_monsoon_gwl"] = None
+                year_data["post_monsoon_gwl"] = None
+            
+            # Add GWR data if available
+            gwr_match = next((g for g in gwr_years if g["year"] == year), None)
+            if gwr_match:
+                year_data["gwr_resource_mcm"] = gwr_match["annual_resource_mcm"]
+            else:
+                year_data["gwr_resource_mcm"] = None
+            
+            merged_data.append(year_data)
+        
+        # === 5. CALCULATE STATISTICS ===
+        storage_values = [d["storage_change_mcm"] for d in merged_data if d["storage_change_mcm"] is not None]
+        gwr_values = [d["gwr_resource_mcm"] for d in merged_data if d["gwr_resource_mcm"] is not None]
+        
+        statistics = {
+            "aquifer_properties": {
+                "total_area_km2": round(total_area_m2 / 1_000_000, 2),
+                "area_weighted_specific_yield": round(specific_yield, 4)
             }
+        }
+        
+        if storage_values:
+            statistics["storage"] = {
+                "years_with_data": len(storage_values),
+                "avg_annual_storage_change_mcm": round(np.mean(storage_values), 2),
+                "total_fluctuation_mcm": round(np.sum(storage_values), 2)
+            }
+        
+        if gwr_values:
+            statistics["gwr"] = {
+                "years_with_data": len(gwr_values),
+                "avg_annual_resource_mcm": round(np.mean(gwr_values), 2),
+                "total_resource_mcm": round(np.sum(gwr_values), 2)
+            }
+        
+        return {
+            "data_type": "storage_vs_gwr",
+            "filters": {
+                "state": state,
+                "district": district,
+                "start_year": start_year,
+                "end_year": end_year
+            },
+            "statistics": statistics,
+            "count": len(merged_data),
+            "data": merged_data,
+            "note": "Storage represents seasonal fluctuation (MCM). GWR represents annual replenishable resource (MCM)."
+        }
     
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"Storage vs GWR Error: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/wells/years")
 def get_wells_years():
@@ -2789,13 +3463,40 @@ def aquifer_suitability_index(
             "statistics": statistics,
             "count": len(aquifers_df),
             "geojson": geojson_data,
+            
+            # ✅ ADDED
             "methodology": {
-                "approach": "Lithology-based specific yield, normalized to 0-5 scale",
+                "approach": "Lithology-based specific yield normalization",
                 "quantile_stretch": {
-                    "low": round(float(q_low), 4), 
-                    "high": round(float(q_high), 4)
-                }
-            }
+                    "low": round(float(q_low), 5),
+                    "high": round(float(q_high), 5)
+                },
+                "steps": [
+                    f"1. Extracted {len(aquifers_df)} aquifer polygons from database",
+                    f"2. Identified dominant lithology: {statistics.get('dominant_aquifer', 'N/A')}",
+                    "3. Mapped lithology to specific yield (Alluvium=0.10, Sandstone=0.06, etc.)",
+                    f"4. Normalized to 0-5 scale using quantile stretching (range: {round(float(q_low), 3)}-{round(float(q_high), 3)})"
+                ],
+                "formula": "ASI = ((Sy - q_low) / (q_high - q_low)) × 5",
+                "data_source": "major_aquifers table"
+            },
+            
+            "interpretation": {
+                "score_meaning": {
+                    "0-1.5": "Poor suitability (hard rock, low storage)",
+                    "1.5-2.5": "Low suitability (weathered rock)",
+                    "2.5-3.5": "Moderate suitability (mixed aquifers)",
+                    "3.5-5.0": "High suitability (alluvium, unconsolidated sediments)"
+                },
+                "regional_rating": "Excellent" if statistics["mean_asi"] > 3.5 else ("Good" if statistics["mean_asi"] > 2.5 else "Moderate"),
+                "high_suitability_percentage": round((aquifers_df['asi_score'] >= 3.5).sum() / len(aquifers_df) * 100, 1)
+            },
+            
+            "key_insights": [
+                f"Mean ASI: {statistics['mean_asi']} ({'good' if statistics['mean_asi'] > 2.5 else 'moderate'} storage potential)",
+                f"{round((aquifers_df['asi_score'] >= 3.5).sum() / len(aquifers_df) * 100, 1)}% of area has high suitability (ASI > 3.5)",
+                f"Dominant aquifer: {statistics.get('dominant_aquifer', 'N/A')}"
+            ]
         }
     
     except HTTPException:
@@ -2935,7 +3636,7 @@ def well_network_density(
         
         return {
             "module": "NETWORK_DENSITY",
-            "description": f"Well network analysis with {radius_km}km radius - TWO MAPS",
+            "description": f"Well network analysis with {radius_km}km radius",
             "filters": {"state": state, "district": district},
             "parameters": {"radius_km": radius_km},
             "statistics": {
@@ -2945,24 +3646,55 @@ def well_network_density(
                 "median_observations": int(sites_df['n_observations'].median()),
                 "grid_cells": len(map2_results)
             },
+            
+            # ✅ ADDED
+            "methodology": {
+                "approach": "Haversine-based spatial signal strength + local density",
+                "steps": [
+                    f"1. Analyzed {len(map1_results)} well sites with ≥6 monthly observations",
+                    "2. Calculated trend slope (m/year) using linear regression",
+                    "3. Computed signal strength = |slope| / standard_deviation",
+                    f"4. Counted neighbors within {radius_km}km radius using haversine distance",
+                    f"5. Generated gridded density map ({len(map2_results)} cells) clipped to region boundary"
+                ],
+                "signal_strength_formula": "strength = |trend_slope| / σ(GWL)",
+                "density_formula": f"density = neighbors / (π × {radius_km}²) × 1000 km²"
+            },
+            
+            "interpretation": {
+                "strength_levels": {
+                    "0-0.3": "Weak signal (noisy data)",
+                    "0.3-0.7": "Moderate signal (detectable trend)",
+                    "0.7-1.5": "Strong signal (reliable trend)",
+                    ">1.5": "Very strong signal (high confidence)"
+                },
+                "density_quality": "Good coverage" if sites_df['local_density_per_km2'].mean() > 0.03 else "Sparse coverage"
+            },
+            
+            "key_insights": [
+                f"{len(map1_results)} monitoring sites analyzed",
+                f"Average signal strength: {round(float(sites_df['strength'].mean()), 2)} ({'high' if sites_df['strength'].mean() > 0.7 else 'moderate'} quality)",
+                f"{int((sites_df['strength'] > 0.7).sum())} sites have strong signal (>0.7)",
+                f"Average local density: {round(float(sites_df['local_density_per_km2'].mean()), 4)} sites/km²"
+            ],
+            
             "map1_site_level": {
                 "count": len(map1_results),
                 "data": map1_results,
-                "description": "Site-level strength (|slope|/σ) with local density"
+                "description": "Site-level strength with local density"
             },
             "map2_gridded": {
                 "count": len(map2_results),
                 "data": map2_results,
-                "description": "Absolute density grid (sites per 1000 km²) clipped to AOI"
+                "description": "Absolute density grid (sites per 1000 km²)"
             }
         }
-    
+   # ✅ ADD THESE LINES (they were missing!)
     except HTTPException:
         raise
     except Exception as e:
         print(f"Network Density Error: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
-
 # =============================================================================
 # ADVANCED MODULE 3: SPATIO-TEMPORAL AQUIFER STRESS SCORE (SASS)
 # =============================================================================
@@ -3095,21 +3827,71 @@ def aquifer_stress_score(
         # Calculate statistics
         sass_values = [r['sass_score'] for r in results]
         
-        # ✅ CRITICAL: RETURN THE RESPONSE
+        # ✅ CREATE statistics VARIABLE BEFORE using it
+        statistics = {
+            "mean_sass": round(float(np.mean(sass_values)), 3) if sass_values else 0.0,
+            "max_sass": round(float(np.max(sass_values)), 3) if sass_values else 0.0,
+            "min_sass": round(float(np.min(sass_values)), 3) if sass_values else 0.0,
+            "stressed_sites": int(sum(1 for s in sass_values if s > 1.0)),
+            "critical_sites": int(sum(1 for s in sass_values if s > 2.0))
+        }
+        
+        # ✅ NOW RETURN THE RESPONSE
         return {
             "module": "SASS",
-            "description": "Spatio-Temporal Aquifer Stress Score (composite index)",
+            "description": "Spatio-Temporal Aquifer Stress Score",
             "filters": {"state": state, "district": district, "year": year, "month": month},
             "formula": "SASS = 0.5×(−z_GWL) + 0.3×z_GRACE + 0.2×z_Rain",
-            "statistics": {
-                "mean_sass": round(float(np.mean(sass_values)), 3) if sass_values else 0.0,
-                "max_sass": round(float(np.max(sass_values)), 3) if sass_values else 0.0,
-                "min_sass": round(float(np.min(sass_values)), 3) if sass_values else 0.0,
-                "stressed_sites": int(sum(1 for s in sass_values if s > 1.0))
-            },
+            "statistics": statistics,
             "count": len(results),
-            "data": results
+            "data": results,
+            
+            "methodology": {
+                "approach": "Multi-source composite stress index",
+                "components": [
+                    {
+                        "name": "GWL Component",
+                        "weight": 0.5,
+                        "formula": "−z_GWL = −(GWL − mean) / std",
+                        "meaning": "Negative z-score means deeper than normal (stressed)",
+                        "data_source": f"Wells within 60 days of {year}-{month:02d}"
+                    },
+                    {
+                        "name": "GRACE Component",
+                        "weight": 0.3,
+                        "formula": "z_GRACE = (TWS − mean) / std",
+                        "meaning": "Positive = more water storage than average",
+                        "data_source": f"GRACE satellite band for {year}-{month:02d}"
+                    },
+                    {
+                        "name": "Rainfall Component",
+                        "weight": 0.2,
+                        "formula": "z_Rain = (Rain − mean) / std",
+                        "meaning": "Positive = more rainfall than average",
+                        "data_source": f"Monthly rainfall for {year}-{month:02d}"
+                    }
+                ],
+                "calculation": "Each component standardized to z-scores, then weighted sum"
+            },
+            
+            "interpretation": {
+                "stress_levels": {
+                    "<0": "No stress (better than average)",
+                    "0-1": "Low stress (monitor)",
+                    "1-2": "Moderate stress (intervention recommended)",
+                    ">2": "Critical stress (urgent action)"
+                },
+                "overall_status": "Critical" if statistics["mean_sass"] > 2 else ("Moderate" if statistics["mean_sass"] > 1 else "Low")
+            },
+            
+            "key_insights": [
+                f"Mean stress score: {statistics['mean_sass']} ({'critical' if statistics['mean_sass'] > 2 else ('moderate' if statistics['mean_sass'] > 1 else 'low')} stress)",
+                f"{statistics['stressed_sites']} sites moderately stressed (SASS > 1)",
+                f"{statistics['critical_sites']} sites critically stressed (SASS > 2)",
+                "GWL contributes 50% to stress score (primary driver)"
+            ]
         }
+        
     
     except HTTPException:
         raise
@@ -3219,10 +4001,16 @@ def grace_divergence_analysis(
                 "well_z_interpolated": round(safe_float(row['well_z_interpolated']), 3),
                 "tws": round(safe_float(row['tws']), 3)
             })
-        
+        statistics = {
+            "mean_divergence": round(safe_float(grace_df['divergence'].mean()), 3),
+            "positive_divergence_pixels": int((grace_df['divergence'] > 0).sum()),
+            "negative_divergence_pixels": int((grace_df['divergence'] < 0).sum()),
+            "max_divergence": round(safe_float(grace_df['divergence'].max()), 3),
+            "min_divergence": round(safe_float(grace_df['divergence'].min()), 3)
+        }
         return {
             "module": "GRACE_DIVERGENCE",
-            "description": "Divergence between GRACE and ground measurements (positive = GRACE shows more water)",
+            "description": "Divergence between GRACE satellite and ground measurements",
             "filters": {"state": state, "district": district, "year": year, "month": month},
             "statistics": {
                 "mean_divergence": round(safe_float(grace_df['divergence'].mean()), 3),
@@ -3232,7 +4020,36 @@ def grace_divergence_analysis(
                 "min_divergence": round(safe_float(grace_df['divergence'].min()), 3)
             },
             "count": len(results),
-            "data": results
+            "data": results,
+            
+            # ✅ ADDED
+            "methodology": {
+                "approach": "Pixel-level difference between satellite and ground observations",
+                "steps": [
+                    f"1. Retrieved GRACE TWS data for {year}-{month:02d} ({len(grace_df)} pixels)",
+                    f"2. Retrieved well GWL data within 60 days of target date ({len(near_wells)} sites)",
+                    "3. Standardized both datasets to z-scores (mean=0, std=1)",
+                    "4. Interpolated well z-scores to GRACE pixel locations",
+                    "5. Calculated divergence = z_GRACE − z_GWL for each pixel"
+                ],
+                "formula": "divergence = z_GRACE − z_well_interpolated"
+            },
+            
+            "interpretation": {
+                "divergence_meaning": {
+                    "positive": "GRACE shows more water than wells indicate (possible measurement mismatch)",
+                    "negative": "Wells show more water than GRACE indicates (local vs regional difference)",
+                    "near_zero": "Good agreement between satellite and ground"
+                },
+                "overall_agreement": "Good" if abs(statistics["mean_divergence"]) < 0.5 else "Poor"
+            },
+            
+            "key_insights": [
+                f"Mean divergence: {statistics['mean_divergence']} ({'good agreement' if abs(statistics['mean_divergence']) < 0.5 else 'poor agreement'})",
+                f"{statistics['positive_divergence_pixels']} pixels: GRACE > Wells",
+                f"{statistics['negative_divergence_pixels']} pixels: Wells > GRACE",
+                "Large divergence may indicate scale mismatch or local pumping effects"
+            ]
         }
     
     except HTTPException:
@@ -3559,11 +4376,19 @@ def gwl_forecast_with_grace(
             )
         
         results_df = pd.DataFrame(results)
-        
+        statistics = {
+            "mean_change_m": round(float(results_df['pred_delta_m'].mean()), 3),
+            "median_change_m": round(float(results_df['pred_delta_m'].median()), 3),
+            "declining_cells": int((results_df['pred_delta_m'] > 0).sum()),
+            "recovering_cells": int((results_df['pred_delta_m'] < 0).sum()),
+            "mean_r_squared": round(float(results_df['r_squared'].mean()), 3),
+            "mean_grace_contribution": round(float(results_df['grace_component'].mean()), 3) if grace_available else 0.0,
+            "success_rate": round(successful / len(grid_lons) * 100, 1)
+        }        
         return {
             "module": "FORECAST_GWL_GRACE",
-            "description": f"GWL forecast ({forecast_months}-month) using deseasonalized trend + GRACE",
-            "method": "OLS with y = a + b*t + c*GRACE_anomaly, then add back GWL seasonality",
+            "description": f"GWL forecast ({forecast_months}-month) using trend + GRACE",
+            "method": "OLS with deseasonalized trend + GRACE anomaly",
             "filters": {"state": state, "district": district},
             "parameters": {
                 "forecast_months": forecast_months,
@@ -3581,9 +4406,41 @@ def gwl_forecast_with_grace(
                 "success_rate": round(successful / len(grid_lons) * 100, 1)
             },
             "count": len(results),
-            "data": results_df.to_dict("records")
+            "data": results_df.to_dict("records"),
+            
+            # ✅ ADDED
+            "methodology": {
+                "approach": "OLS regression on deseasonalized GWL with GRACE anomaly",
+                "model": "y_future = a + b×time + c×GRACE_anomaly",
+                "steps": [
+                    f"1. Built monthly GWL matrix from {len(mat)} months of well data",
+                    f"2. Created {grid_resolution}×{grid_resolution} grid ({len(grid_lons)} cells in AOI)",
+                    f"3. For each cell, computed neighbor-weighted GWL using {k_neighbors} nearest wells",
+                    "4. Deseasonalized GWL by removing monthly climatology (extract trend+residual)",
+                    f"5. {'Interpolated GRACE TWS and deseasonalized' if grace_available else 'No GRACE data available'}",
+                    f"6. Fit OLS: y = a + b×t + c×GRACE, forecast {forecast_months} months ahead",
+                    "7. Added back GWL seasonality to forecast"
+                ],
+                "seasonality_handling": "Monthly climatology removed before trend fitting, added back for forecast"
+            },
+            
+            "interpretation": {
+                "change_meaning": {
+                    "positive": "Declining (water levels getting deeper)",
+                    "negative": "Recovering (water levels getting shallower)"
+                },
+                "confidence": f"{'High' if statistics['mean_r_squared'] > 0.7 else ('Medium' if statistics['mean_r_squared'] > 0.5 else 'Low')} (R² = {statistics['mean_r_squared']})",
+                "grace_impact": f"GRACE contributes average {statistics['mean_grace_contribution']}m to forecast" if grace_available else "No GRACE data used"
+            },
+            
+            "key_insights": [
+                f"Expected {forecast_months}-month change: {statistics['mean_change_m']}m ({'declining' if statistics['mean_change_m'] > 0 else 'recovering'})",
+                f"{statistics['declining_cells']} cells forecasted to decline",
+                f"{statistics['recovering_cells']} cells forecasted to recover",
+                f"Model confidence: {statistics['mean_r_squared']} R² ({'good' if statistics['mean_r_squared'] > 0.7 else 'moderate'})"
+            ]
         }
-    
+            
     except HTTPException:
         raise
     except Exception as e:
@@ -3777,8 +4634,40 @@ def recharge_planning(
                 "per_km2_mcm": round(potential_recharge_mcm / total_area_km2, 4) if total_area_km2 > 0 else 0
             },
             "structure_plan": structure_plan,
-            "site_recommendations": site_recommendations[:100],  # Limit to 100 sites
-            "count": len(site_recommendations)
+            "site_recommendations": site_recommendations[:100],
+            "count": len(site_recommendations),
+            
+            # ✅ ADDED
+            "methodology": {
+                "approach": "Runoff-based MAR potential with structure allocation",
+                "calculation_steps": [
+                    f"1. Region area: {round(total_area_km2, 2)} km²",
+                    f"2. Identified dominant lithology: {dominant_lithology} (from aquifer database)",
+                    f"3. Applied runoff coefficient: {runoff_coeff} (lithology-based)",
+                    f"4. Estimated monsoon rainfall: {round(rainfall_m, 3)}m (from {use_year} data)",
+                    f"5. Assumed capture efficiency: {capture_fraction*100}% (typical for MAR structures)"
+                ],
+                "formula": "Potential (MCM) = Area × Rainfall × Runoff_Coeff × Capture_Fraction",
+                "full_calculation": f"{round(total_area_km2, 2)} km² × {round(rainfall_m, 3)}m × {runoff_coeff} × {capture_fraction} = {round(potential_recharge_mcm, 2)} MCM"
+            },
+            
+            "interpretation": {
+                "structure_types": {
+                    "Percolation tank": "Large capacity (50,000 m³), suitable for high-ASI alluvial zones",
+                    "Check dam": "Medium capacity (30,000 m³), good for seasonal streams",
+                    "Recharge shaft": "Small capacity (500 m³), for stressed urban sites",
+                    "Farm pond": "Small capacity (1,000 m³), distributed rural recharge",
+                    "Gabion": "Very small (2,500 m³), erosion control + recharge"
+                },
+                "allocation_strategy": "30% percolation tanks, 30% check dams, 20% shafts, 15% ponds, 5% gabions"
+            },
+            
+            "key_insights": [
+                f"Total MAR potential: {round(potential_recharge_mcm, 2)} MCM/year",
+                f"Recommended {sum(s['recommended_units'] for s in structure_plan)} total structures",
+                f"Dominant lithology ({dominant_lithology}) influences runoff coefficient ({runoff_coeff})",
+                f"{'Site-specific recommendations based on stress analysis' if site_recommendations else 'Run SASS for site-specific planning'}"
+            ]
         }
     
     except HTTPException:
@@ -3866,7 +4755,8 @@ def significant_trends(
             "filters": {"state": state, "district": district},
             "parameters": {
                 "p_threshold": p_threshold,
-                "method": "Mann-Kendall" if MK_AVAILABLE else "OLS"
+                "method": "Mann-Kendall" if MK_AVAILABLE else "OLS",
+                "min_months_required": 12
             },
             "statistics": {
                 "total_significant": len(significant_sites),
@@ -3876,7 +4766,40 @@ def significant_trends(
                 "high_significance": int((sites_df['p_value'] < 0.01).sum())
             },
             "count": len(significant_sites),
-            "data": significant_sites
+            "data": significant_sites,
+            
+            # ✅ ADDED
+            "methodology": {
+                "approach": f"{'Mann-Kendall trend test' if MK_AVAILABLE else 'OLS linear regression'} with significance testing",
+                "steps": [
+                    "1. Filtered wells to sites with ≥12 monthly observations",
+                    "2. Resampled each site to monthly mean GWL",
+                    f"3. Applied {'Mann-Kendall test' if MK_AVAILABLE else 'linear regression'} to detect monotonic trends",
+                    f"4. Retained only sites with p-value < {p_threshold} (significant trends)",
+                    "5. Classified as declining (slope > 0) or recovering (slope < 0)"
+                ],
+                "significance_levels": {
+                    "p < 0.01": "High significance (99% confidence)",
+                    "p < 0.05": "Medium significance (95% confidence)",
+                    f"p < {p_threshold}": "Low significance (threshold for inclusion)"
+                }
+            },
+            
+            "interpretation": {
+                "slope_meaning": {
+                    "positive": "Declining (GWL getting deeper over time)",
+                    "negative": "Recovering (GWL getting shallower over time)"
+                },
+                "trend_strength": f"Mean slope: {round(float(sites_df['slope_m_per_year'].mean()), 3)}m/year"
+            },
+            
+            "key_insights": [
+                f"{len(significant_sites)} sites have statistically significant trends",
+                f"{int((sites_df['slope_m_per_year'] > 0).sum())} sites declining",
+                f"{int((sites_df['slope_m_per_year'] < 0).sum())} sites recovering",
+                f"{int((sites_df['p_value'] < 0.01).sum())} sites highly significant (p < 0.01)",
+                f"Average trend: {round(float(sites_df['slope_m_per_year'].mean()), 3)}m/year"
+            ]
         }
     
     except HTTPException:
@@ -3897,6 +4820,7 @@ def changepoint_detection(
 ):
     """
     Detect structural breaks in GWL time series using PELT algorithm
+    NOW RETURNS TWO MAPS: Changepoints + Coverage Diagnostics
     """
     if not RUPTURES_AVAILABLE:
         raise HTTPException(
@@ -3913,33 +4837,31 @@ def changepoint_detection(
         
         changepoint_sites = []
         coverage_sites = []
-        analyzed_sites = []  # ✅ NEW: Track sites that were actually analyzed
+        analyzed_sites = []
         
         for site_id, group in wells_df.groupby('site_id'):
             group = group.sort_values('date')
             series = group.set_index('date')['gwl'].resample('MS').mean().interpolate().dropna()
             
-            # Coverage info for ALL sites
+            # ✅ COVERAGE INFO FOR ALL SITES (regardless of length)
             if len(series) > 0:
                 coverage_sites.append({
                     "site_id": site_id,
-                    "latitude": group['latitude'].iloc[0],
-                    "longitude": group['longitude'].iloc[0],
-                    "n_months": len(series),
+                    "latitude": float(group['latitude'].iloc[0]),
+                    "longitude": float(group['longitude'].iloc[0]),
+                    "n_months": int(len(series)),
                     "date_start": series.index.min().date().isoformat(),
                     "date_end": series.index.max().date().isoformat(),
                     "span_years": round((series.index.max() - series.index.min()).days / 365.25, 1),
-                    "analyzed": len(series) >= 24  # ✅ NEW: Flag if analyzed
+                    "analyzed": len(series) >= 24  # Flag if meets threshold
                 })
             
-            # Only analyze sites with sufficient data
+            # ✅ CHANGEPOINT DETECTION (only for sites with ≥24 months)
             if len(series) < 24:
                 continue
             
-            # ✅ NEW: Add to analyzed_sites counter
             analyzed_sites.append(site_id)
             
-            # Changepoint detection
             try:
                 algo = rpt.Pelt(model="l2").fit(series.values)
                 breakpoints = algo.predict(pen=penalty)
@@ -3951,55 +4873,98 @@ def changepoint_detection(
                         
                         changepoint_sites.append({
                             "site_id": site_id,
-                            "latitude": group['latitude'].iloc[0],
-                            "longitude": group['longitude'].iloc[0],
+                            "latitude": float(group['latitude'].iloc[0]),
+                            "longitude": float(group['longitude'].iloc[0]),
                             "changepoint_date": first_bp_date.date().isoformat(),
-                            "changepoint_year": first_bp_date.year,
-                            "changepoint_month": first_bp_date.month,
+                            "changepoint_year": int(first_bp_date.year),
+                            "changepoint_month": int(first_bp_date.month),
                             "n_breakpoints": len(breakpoints) - 1,
                             "all_breakpoints": [
                                 series.index[min(bp, len(series)-1)].date().isoformat() 
                                 for bp in breakpoints[:-1]
                             ],
-                            "series_length": len(series)
+                            "series_length": int(len(series))
                         })
             except Exception as e:
                 print(f"Changepoint detection failed for {site_id}: {e}")
                 continue
         
-        # ✅ FIXED: Calculate detection rate using analyzed_sites
+        # ✅ CALCULATE STATISTICS
         num_analyzed = len(analyzed_sites)
         detection_rate = round(len(changepoint_sites) / num_analyzed * 100, 1) if num_analyzed > 0 else 0
         
+        # ✅ BUILD RESPONSE WITH BOTH MAPS
         return {
             "module": "CHANGEPOINTS",
-            "description": "Structural break detection using PELT algorithm with coverage diagnostics",
+            "description": "Structural break detection using PELT algorithm + Coverage Diagnostics",
             "filters": {"state": state, "district": district},
             "parameters": {
                 "penalty": penalty,
                 "algorithm": "PELT",
                 "model": "l2 (mean shift detection)",
-                "min_months_required": 24  # ✅ NEW: Make this explicit
+                "min_months_required": 24
             },
+            
+            # ✅ OVERALL STATISTICS
             "statistics": {
-                "total_sites": len(coverage_sites),  # All sites found
-                "sites_analyzed": num_analyzed,  # ✅ FIXED: Only those with ≥24 months
+                "total_sites": len(coverage_sites),
+                "sites_analyzed": num_analyzed,
                 "sites_with_changepoints": len(changepoint_sites),
-                "detection_rate": detection_rate,  # ✅ FIXED: Now correct percentage
+                "detection_rate": detection_rate,
                 "avg_series_length": round(np.mean([s['n_months'] for s in coverage_sites]), 1) if coverage_sites else 0,
                 "avg_span_years": round(np.mean([s['span_years'] for s in coverage_sites]), 1) if coverage_sites else 0,
-                "sites_insufficient_data": len(coverage_sites) - num_analyzed  # ✅ NEW: Show how many were skipped
+                "sites_insufficient_data": len(coverage_sites) - num_analyzed
             },
+            
+            # ✅ MAP 1: CHANGEPOINTS (year of first break)
             "changepoints": {
                 "count": len(changepoint_sites),
                 "data": changepoint_sites,
-                "description": "Sites with detected structural breaks"
+                "description": "Sites with detected structural breaks (first breakpoint shown)"
             },
+            
+            # ✅ MAP 2: COVERAGE (months/span per site)
             "coverage": {
                 "count": len(coverage_sites),
-                "data": coverage_sites[:200],
-                "description": "Data quality and temporal coverage per site (max 200 shown)"
-            }
+                "data": coverage_sites,  # Limit to 200 for performance
+                "description": "Data coverage per site (shows power to detect changepoints)"
+            },
+            
+            # ✅ METHODOLOGY
+            "methodology": {
+                "approach": "PELT (Pruned Exact Linear Time) algorithm for changepoint detection",
+                "steps": [
+                    f"1. Analyzed {len(coverage_sites)} wells in region",
+                    f"2. Filtered to {num_analyzed} sites with ≥24 months of data",
+                    "3. Resampled each site to monthly mean GWL and interpolated gaps",
+                    f"4. Applied PELT with penalty={penalty} to detect mean shifts",
+                    "5. Identified dates where GWL behavior changed abruptly",
+                    "6. Created coverage map to show detection power per site"
+                ],
+                "penalty_meaning": f"Penalty={penalty}: {'Higher penalty = fewer breakpoints' if penalty > 10 else 'Lower penalty = more sensitive detection'}",
+                "model_type": "L2 norm detects changes in mean level (not variance or slope)"
+            },
+            
+            # ✅ INTERPRETATION
+            "interpretation": {
+                "changepoint_meaning": "Date when GWL trend changed direction or magnitude",
+                "coverage_importance": "Sites with longer series (high months/span) have higher detection power",
+                "causes": [
+                    "Policy changes (pumping regulations)",
+                    "Infrastructure (new wells, canals)",
+                    "Climate shifts (drought, wet period)",
+                    "Land use changes (urbanization, irrigation)"
+                ]
+            },
+            
+            # ✅ KEY INSIGHTS
+            "key_insights": [
+                f"{len(changepoint_sites)} sites ({detection_rate}% of analyzed) have structural breaks",
+                f"Average series length: {round(np.mean([s['n_months'] for s in coverage_sites]), 1)} months",
+                f"{len(coverage_sites) - num_analyzed} sites skipped (insufficient data < 24 months)",
+                "Coverage map shows which sites have sufficient data for robust detection",
+                "Changepoints indicate regime shifts in groundwater behavior"
+            ]
         }
     
     except HTTPException:
@@ -4143,10 +5108,7 @@ def rainfall_gwl_lag_correlation(
         return {
             "module": "LAG_CORRELATION",
             "description": f"Rainfall to GWL response lag analysis (0-{max_lag_months} months)",
-            "filters": {
-                "state": state, 
-                "district": district
-            },
+            "filters": {"state": state, "district": district},
             "parameters": {
                 "max_lag_months": max_lag_months,
                 "min_months_required": MIN_OBSERVATIONS
@@ -4163,7 +5125,43 @@ def rainfall_gwl_lag_correlation(
                 "lag_distribution": lag_distribution
             },
             "count": len(lag_results),
-            "data": lag_results[:500]  # Increased limit to show more points on map
+            "data": lag_results[:500],
+            
+            # ✅ ADDED
+            "methodology": {
+                "approach": "Cross-correlation between rainfall and GWL at varying time lags",
+                "steps": [
+                    f"1. Retrieved monthly rainfall data for region",
+                    f"2. Filtered wells to {len(valid_sites)} sites with ≥{MIN_OBSERVATIONS} observations",
+                    "3. Resampled both datasets to monthly resolution",
+                    "4. For each lag (0 to {max_lag_months} months):",
+                    "   - Shifted rainfall forward by lag months",
+                    "   - Calculated correlation with GWL",
+                    "5. Selected lag with maximum absolute correlation"
+                ],
+                "lag_interpretation": "Lag = time between rainfall event and GWL response",
+                "correlation_formula": "Pearson correlation coefficient between Rain(t-lag) and GWL(t)"
+            },
+            
+            "interpretation": {
+                "lag_meaning": {
+                    "0_months": "Immediate response (shallow aquifer, direct recharge)",
+                    "1-3_months": "Quick response (permeable formations)",
+                    "4-6_months": "Moderate response (typical for most aquifers)",
+                    "7-12_months": "Slow response (deep aquifers, low permeability)"
+                },
+                "correlation_sign": {
+                    "positive": "More rain → deeper GWL (unusual, may indicate pumping increase)",
+                    "negative": "More rain → shallower GWL (normal recharge response)"
+                }
+            },
+            
+            "key_insights": [
+                f"Mean lag: {round(float(results_df['best_lag_months'].mean()), 1)} months (median: {int(results_df['best_lag_months'].median())})",
+                f"Average correlation: {round(float(results_df['abs_correlation'].mean()), 2)}",
+                f"Most common lag: {max(lag_distribution, key=lag_distribution.get)} months ({lag_distribution[max(lag_distribution, key=lag_distribution.get)]} sites)",
+                f"Processed {sites_processed} sites, skipped {sites_skipped} (insufficient overlap)"
+            ]
         }
     
     except HTTPException:
@@ -4284,7 +5282,41 @@ def decline_hotspot_clustering(
             },
             "clusters": cluster_stats,
             "count": len(results),
-            "data": results
+            "data": results,
+            
+            # ✅ ADDED
+            "methodology": {
+                "approach": "DBSCAN (Density-Based Spatial Clustering) for hotspot identification",
+                "steps": [
+                    f"1. Calculated trend slopes for all sites (need ≥6 observations)",
+                    f"2. Filtered to {len(declining)} declining sites (positive slope = deeper GWL)",
+                    f"3. Applied DBSCAN with ε={round(eps_km, 2)}km, min_samples={min_samples}",
+                    "4. Used haversine distance metric (accounts for Earth curvature)",
+                    f"5. Identified {len(cluster_stats)} clusters of spatially concentrated decline"
+                ],
+                "parameters_meaning": {
+                    "eps": f"{round(eps_km, 2)}km - Maximum distance between sites in same cluster",
+                    "min_samples": f"{min_samples} - Minimum sites needed to form a cluster"
+                },
+                "noise_handling": "Sites not meeting density criteria labeled as noise (-1)"
+            },
+            
+            "interpretation": {
+                "cluster_meaning": "Spatially concentrated area of groundwater decline",
+                "hotspot_significance": [
+                    "Multiple nearby sites declining together",
+                    "May indicate shared stress factors (pumping, drought, policy)",
+                    "Priority zones for intervention"
+                ],
+                "noise_meaning": "Isolated declining sites (not part of spatial cluster)"
+            },
+            
+            "key_insights": [
+                f"{len(cluster_stats)} decline hotspots identified",
+                f"{int((declining['cluster'] != -1).sum())} sites clustered ({round(int((declining['cluster'] != -1).sum()) / len(declining) * 100, 1)}% of declining sites)",
+                f"{int((declining['cluster'] == -1).sum())} isolated decline sites (noise)",
+                f"Largest cluster: {max(cluster_stats, key=lambda x: x['n_sites'])['n_sites'] if cluster_stats else 0} sites"
+            ]
         }
     
     except HTTPException:
