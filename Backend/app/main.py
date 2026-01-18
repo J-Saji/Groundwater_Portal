@@ -287,28 +287,31 @@ if CHATBOT_AVAILABLE:
 # 5. Step B: QA Chain (The Answerer)
         qa_system_prompt = """You are an expert Hydrogeologist for the GeoHydro platform.
 
-        You have access to:
-        1. **LIVE DASHBOARD STATISTICS:** Complete analytics from the user's current map view (aquifers, wells, GRACE, rainfall, and all 10 advanced modules). These numbers are EXACT and come directly from what the user sees on screen.
-        2. **KNOWLEDGE BASE:** Scientific reports and definitions from the vector database.only use this to support your answers.
+        **AVAILABLE DATA:**
+        - Dashboard Statistics: {map_context} (exact numbers from user's current view)
+        - Knowledge Base: {context} (reference documents for scientific context)
+        - Chat History: {chat_history} (previous conversation)
 
-        CRITICAL INSTRUCTIONS:
-        - **Use Provided Stats:** The map_context contains pre-calculated statistics for EVERYTHING the user can see. Never say "I need to analyze" - the analysis is already done!
-        - **Be Specific:** Use exact numbers from the context. Example: "Mean SASS score is 2.4" (not "the stress is moderate")
-        - **Explain Methodology:** When asked "how", reference the methodology sections in the context
-        - **Handle Missing Data:** If a module shows no data, explain that the analysis isn't available for this specific region/timeframe
-        - **Location-Aware:** Always mention the specific district/state being analyzed
-        - **Interpret Numbers:** Combine the statistics with your hydrogeological expertise to give meaningful insights
+        **RESPONSE STYLE:**
+        - Be thorough and detailed when explaining concepts
+        - Use exact statistics from dashboard data
+        - Combine numbers with hydrogeological interpretation
+        - Explain what values mean in practical terms
+        - Provide context using knowledge base when relevant
 
-        **DASHBOARD CONTEXT (Live Data):**
-        {map_context}
+        **HONESTY RULES:**
+        - If you don't know something specific, say "I don't know [X]"
+        - Never mention "context", "knowledge base", or "provided information" in your response
+        - Never explain your limitations - just admit gaps simply
 
-        **KNOWLEDGE BASE (Static Reference):**
-        {context}
-        """
+        **CURRENT QUESTION:** {question}
+
+        Provide a detailed, expert-level answer:"""
+                
 
         qa_prompt = PromptTemplate(
             template=qa_system_prompt + "\nUSER QUESTION: {question}",
-            input_variables=["map_context", "context", "question"]
+            input_variables=["map_context", "context", "question", "chat_history"]
         )
 
         qa_chain = qa_prompt | llm | StrOutputParser()
@@ -793,6 +796,97 @@ def compute_gridded_density(wells_gdf, selection_boundary, bounds, radius_km=20.
     
     return result
 
+def interpolate_grid_points(points, value_key="lwe_cm"):
+    """
+    Increase point density through spatial interpolation
+    - For 1-2 points: triple the count (1→3, 2→6)
+    - For 3+ points: ~2x density with interpolation
+    """
+    if not points:
+        return points
+    
+    # Special handling for 1-2 points: just triple them with small offsets
+    if len(points) <= 2:
+        print(f"Small region interpolation: {len(points)} points → tripling to {len(points) * 3}")
+        expanded_points = []
+        
+        # Use smaller offset and spread in multiple directions to stay within boundary
+        offset = 0.03  # Reduced from 0.08 to 0.03 degrees (~3km)
+        
+        for original_point in points:
+            # Original point
+            expanded_points.append(original_point.copy())
+            
+            # Add 2 nearby points in different directions (NE and SW pattern)
+            # This creates a small cluster around the original point
+            for dx, dy in [(offset, offset), (-offset, -offset)]:
+                new_point = original_point.copy()
+                new_point['longitude'] = original_point['longitude'] + dx
+                new_point['latitude'] = original_point['latitude'] + dy
+                expanded_points.append(new_point)
+        
+        print(f"Small region SUCCESS: {len(points)} → {len(expanded_points)} points")
+        return expanded_points
+    
+    # Regular interpolation for 3+ points
+    coords = np.array([[p['longitude'], p['latitude']] for p in points])
+    values = np.array([p[value_key] for p in points])
+    
+    # Calculate grid spacing
+    unique_lons = np.unique(coords[:, 0])
+    unique_lats = np.unique(coords[:, 1])
+    
+    print(f"Interpolation input: {len(points)} points, {len(unique_lons)} unique lons, {len(unique_lats)} unique lats")
+    
+    if len(unique_lons) < 2 or len(unique_lats) < 2:
+        print(f"Interpolation skipped: points don't form a 2D grid (lons={len(unique_lons)}, lats={len(unique_lats)})")
+        return points
+    
+    lon_spacing = np.median(np.diff(np.sort(unique_lons)))
+    lat_spacing = np.median(np.diff(np.sort(unique_lats)))
+    
+    # Create grid with 1.5x density (gives ~2.25x total points)
+    density_factor = 1.5
+    new_lon_spacing = lon_spacing / density_factor
+    new_lat_spacing = lat_spacing / density_factor
+    
+    lon_min, lon_max = coords[:, 0].min(), coords[:, 0].max()
+    lat_min, lat_max = coords[:, 1].min(), coords[:, 1].max()
+    
+    new_lons = np.arange(lon_min, lon_max + new_lon_spacing, new_lon_spacing)
+    new_lats = np.arange(lat_min, lat_max + new_lat_spacing, new_lat_spacing)
+    
+    print(f"Creating interpolation grid: {len(new_lons)}x{len(new_lats)} = {len(new_lons) * len(new_lats)} potential points")
+    
+    grid_lon, grid_lat = np.meshgrid(new_lons, new_lats)
+    
+    # Interpolate values
+    try:
+        grid_values = griddata(coords, values, (grid_lon, grid_lat), method='linear', fill_value=np.nan)
+    except Exception as e:
+        print(f"Interpolation griddata failed: {e}")
+        return points
+    
+    # Convert to point list
+    interpolated_points = []
+    for i in range(len(new_lats)):
+        for j in range(len(new_lons)):
+            if not np.isnan(grid_values[i, j]):
+                point = {
+                    'longitude': float(grid_lon[i, j]),
+                    'latitude': float(grid_lat[i, j]),
+                    value_key: round(float(grid_values[i, j]), 3)
+                }
+                # Copy other fields from first point
+                for key in points[0].keys():
+                    if key not in ['longitude', 'latitude', value_key]:
+                        point[key] = points[0][key]
+                interpolated_points.append(point)
+    
+    print(f"Interpolation SUCCESS: {len(points)} → {len(interpolated_points)} points (density x{density_factor})")
+    return interpolated_points if len(interpolated_points) > 0 else points
+
+
 def build_monthly_site_matrix(wells_df):
     """
     Build monthly site matrix (date × site_id) for composite GWL series
@@ -1003,8 +1097,8 @@ def query_grace_monthly(boundary_geojson: str = None):
 
 def query_rainfall_monthly(boundary_geojson: str = None):
     """
-    OPTIMIZED: Query rainfall year-by-year, aggregate to monthly
-    Much faster than per-month queries
+    OPTIMIZED: Parallel year processing for 5-6x speedup
+    Queries multiple years simultaneously with ThreadPoolExecutor
     """
     # Check cache first
     cache_key = f"rainfall_monthly_{hash(boundary_geojson) if boundary_geojson else 'all'}"
@@ -1017,16 +1111,14 @@ def query_rainfall_monthly(boundary_geojson: str = None):
         print("  ⚠️  No rainfall tables found!")
         return pd.DataFrame(columns=['period', 'avg_rainfall'])
     
-    print(f"  🌧️  Querying Rainfall: {len(RAINFALL_TABLES)} years (year-based batching)...")
+    print(f"  🌧️  Querying Rainfall: {len(RAINFALL_TABLES)} years (parallel processing)...")
     
-    rainfall_data = []
-    
-    # Process each year's table
-    for year, table_name in sorted(RAINFALL_TABLES.items()):
+    def process_year(year_table_tuple):
+        """Process a single year's rainfall data"""
+        year, table_name = year_table_tuple
+        year_data = []
+        
         try:
-            # Get all 12 months for this year in ONE query
-            monthly_results = []
-            
             for month in range(1, 13):
                 first_day, last_day = get_month_day_range(year, month)
                 bands = list(range(first_day, last_day + 1))
@@ -1077,19 +1169,36 @@ def query_rainfall_monthly(boundary_geojson: str = None):
                     result = conn.execute(query, params).fetchone()
                     
                     if result and result[0] is not None:
-                        monthly_results.append({
+                        year_data.append({
                             "period": datetime(year, month, 1),
                             "avg_rainfall": round(float(result[0]), 2)
                         })
             
-            rainfall_data.extend(monthly_results)
-            print(f"    ✓ Year {year}: {len(monthly_results)} months")
+            print(f"    ✓ Year {year}: {len(year_data)} months")
+            return year_data
             
         except Exception as e:
             print(f"    ⚠️  Year {year} error: {str(e)[:150]}")
-            continue
+            return []
+    
+    # Process years in parallel (max 6 workers to avoid overwhelming DB)
+    all_year_items = list(sorted(RAINFALL_TABLES.items()))
+    rainfall_data = []
+    
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        # Submit all year processing tasks
+        futures = [executor.submit(process_year, year_item) for year_item in all_year_items]
+        
+        # Collect results as they complete
+        for future in futures:
+            year_result = future.result()
+            rainfall_data.extend(year_result)
     
     df = pd.DataFrame(rainfall_data) if rainfall_data else pd.DataFrame(columns=['period', 'avg_rainfall'])
+    
+    # Sort by period (since parallel processing may complete out of order)
+    if not df.empty:
+        df = df.sort_values('period').reset_index(drop=True)
     
     # Store in cache
     RAINFALL_CACHE.set(cache_key, df)
@@ -1477,7 +1586,8 @@ The user is viewing the GeoHydro dashboard for: {district or 'All Districts'}, {
         answer = qa_chain.invoke({
             "map_context": full_map_context,  # ✅ Frontend-provided stats
             "context": retrieved_docs,         # ✅ Vector DB knowledge
-            "question": standalone_question 
+            "question": standalone_question,
+            "chat_history": history_text
         })
         
         print(f"✅ Answer generated ({len(answer)} chars)")
@@ -1869,10 +1979,7 @@ def get_aquifers_by_state(state_name: str):
                 SELECT 
                     a.aquifer, a.aquifers, a.zone_m, a.mbgl, a.avg_mbgl,
                     a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.stname,
-                    ST_AsGeoJSON(ST_Intersection(
-                        ST_MakeValid(a.geometry),
-                        ST_GeomFromGeoJSON(:state_geojson)
-                    )) AS geojson,
+                    ST_AsGeoJSON(ST_MakeValid(a.geometry)) AS geojson,
                     ST_Y(ST_Centroid(a.geometry)) AS center_lat,
                     ST_X(ST_Centroid(a.geometry)) AS center_lng
                 FROM public.major_aquifers a
@@ -1880,10 +1987,24 @@ def get_aquifers_by_state(state_name: str):
                     ST_MakeValid(a.geometry),
                     ST_GeomFromGeoJSON(:state_geojson)
                 )
+                AND LOWER(a.stname) LIKE LOWER(:state_pattern)
                 ORDER BY a.aquifer;
             """)
             
-            result = conn.execute(aquifer_query, {"state_geojson": state_row[0]})
+            # Create very flexible pattern for state name matching
+            # Handles: "Dadra, Nagar Haveli, Daman & Diu" vs "DADRA,NAGAR HAVELI,dAMAN & DIU"
+            # Replace commas with space (not empty) to preserve word boundaries
+            normalized = state_name.replace(',', ' ').replace(' and ', ' ').replace(' & ', ' ').replace('  ', ' ').strip()
+            # Split into words and join with wildcards
+            words = [w.strip() for w in normalized.split() if w.strip()]
+            state_pattern = '%' + '%'.join(words) + '%'
+            print(f"  🔍 Aquifer filter: state_name='{state_name}' → pattern='{state_pattern}'")
+            
+            result = conn.execute(aquifer_query, {
+                "state_geojson": state_row[0], 
+                "state_name": state_name,
+                "state_pattern": state_pattern
+            })
             
             aquifers = []
             for row in result:
@@ -1899,6 +2020,39 @@ def get_aquifers_by_state(state_name: str):
                 except Exception as e:
                     print(f"Error parsing aquifer geometry: {e}")
                     continue
+            
+            # Fallback: If no aquifers found with state name filter, try spatial-only
+            if not aquifers:
+                print(f"No aquifers found for {state_name} with name filter, trying spatial-only...")
+                fallback_query = text("""
+                    SELECT 
+                        a.aquifer, a.aquifers, a.zone_m, a.mbgl, a.avg_mbgl,
+                        a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.stname,
+                        ST_AsGeoJSON(ST_MakeValid(a.geometry)) AS geojson,
+                        ST_Y(ST_Centroid(a.geometry)) AS center_lat,
+                        ST_X(ST_Centroid(a.geometry)) AS center_lng
+                    FROM public.major_aquifers a
+                    WHERE ST_Intersects(
+                        ST_MakeValid(a.geometry),
+                        ST_GeomFromGeoJSON(:state_geojson)
+                    )
+                    ORDER BY a.aquifer
+                    LIMIT 50;
+                """)
+                fallback_result = conn.execute(fallback_query, {"state_geojson": state_row[0]})
+                for row in fallback_result:
+                    try:
+                        geom_json = json.loads(row[10])
+                        aquifers.append({
+                            "aquifer": row[0], "aquifers": row[1], "zone_m": row[2],
+                            "mbgl": row[3], "avg_mbgl": row[4], "m2_perday": row[5],
+                            "m3_per_day": row[6], "yeild": row[7], "per_cm": row[8],
+                            "stname": row[9], "geometry": geom_json,
+                            "center": [row[11], row[12]] if row[11] and row[12] else None
+                        })
+                    except Exception as e:
+                        print(f"Error parsing fallback aquifer geometry: {e}")
+                        continue
             
             if not aquifers:
                 raise HTTPException(status_code=404, detail=f"No aquifers found for state: {state_name}")
@@ -1936,21 +2090,45 @@ def get_aquifers_by_district(state_name: str, district_name: str):
                 SELECT 
                     a.aquifer, a.aquifers, a.zone_m, a.mbgl, a.avg_mbgl,
                     a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.stname,
-                    ST_AsGeoJSON(ST_Intersection(
-                        ST_MakeValid(a.geometry),
-                        ST_GeomFromGeoJSON(:district_geojson)
-                    )) AS geojson,
-                    ST_Y(ST_Centroid(a.geometry)) AS center_lat,
-                    ST_X(ST_Centroid(a.geometry)) AS center_lng
+                    ST_AsGeoJSON(
+                        ST_MakeValid(
+                            ST_Intersection(
+                                ST_MakeValid(a.geometry),
+                                ST_GeomFromGeoJSON(:district_geojson)
+                            )
+                        )
+                    ) AS geojson,
+                    ST_Y(ST_Centroid(
+                        ST_Intersection(
+                            ST_MakeValid(a.geometry),
+                            ST_GeomFromGeoJSON(:district_geojson)
+                        )
+                    )) AS center_lat,
+                    ST_X(ST_Centroid(
+                        ST_Intersection(
+                            ST_MakeValid(a.geometry),
+                            ST_GeomFromGeoJSON(:district_geojson)
+                        )
+                    )) AS center_lng
                 FROM public.major_aquifers a
                 WHERE ST_Intersects(
                     ST_MakeValid(a.geometry),
                     ST_GeomFromGeoJSON(:district_geojson)
                 )
+                AND LOWER(a.stname) LIKE LOWER(:state_pattern)
                 ORDER BY a.aquifer;
             """)
             
-            result = conn.execute(aquifer_query, {"district_geojson": district_row[0]})
+            # Create very flexible pattern for state name matching
+            normalized = state_name.replace(',', ' ').replace(' and ', ' ').replace(' & ', ' ').replace('  ', ' ').strip()
+            words = [w.strip() for w in normalized.split() if w.strip()]
+            state_pattern = '%' + '%'.join(words) + '%'
+            
+            result = conn.execute(aquifer_query, {
+                "district_geojson": district_row[0], 
+                "state_name": state_name,
+                "state_pattern": state_pattern
+            })
             
             aquifers = []
             for row in result:
@@ -1966,6 +2144,39 @@ def get_aquifers_by_district(state_name: str, district_name: str):
                 except Exception as e:
                     print(f"Error parsing aquifer geometry: {e}")
                     continue
+            
+            # Fallback: If no aquifers found with state name filter, try spatial-only
+            if not aquifers:
+                print(f"No aquifers found for {district_name} with name filter, trying spatial-only...")
+                fallback_query = text("""
+                    SELECT 
+                        a.aquifer, a.aquifers, a.zone_m, a.mbgl, a.avg_mbgl,
+                        a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.stname,
+                        ST_AsGeoJSON(ST_MakeValid(a.geometry)) AS geojson,
+                        ST_Y(ST_Centroid(a.geometry)) AS center_lat,
+                        ST_X(ST_Centroid(a.geometry)) AS center_lng
+                    FROM public.major_aquifers a
+                    WHERE ST_Intersects(
+                        ST_MakeValid(a.geometry),
+                        ST_GeomFromGeoJSON(:district_geojson)
+                    )
+                    ORDER BY a.aquifer
+                    LIMIT 50;
+                """)
+                fallback_result = conn.execute(fallback_query, {"district_geojson": district_row[0]})
+                for row in fallback_result:
+                    try:
+                        geom_json = json.loads(row[10])
+                        aquifers.append({
+                            "aquifer": row[0], "aquifers": row[1], "zone_m": row[2],
+                            "mbgl": row[3], "avg_mbgl": row[4], "m2_perday": row[5],
+                            "m3_per_day": row[6], "yeild": row[7], "per_cm": row[8],
+                            "stname": row[9], "geometry": geom_json,
+                            "center": [row[11], row[12]] if row[11] and row[12] else None
+                        })
+                    except Exception as e:
+                        print(f"Error parsing fallback aquifer geometry: {e}")
+                        continue
             
             if not aquifers:
                 raise HTTPException(status_code=404, detail=f"No aquifers found for district: {district_name}")
@@ -2312,13 +2523,11 @@ def get_wells_timeseries(
                         valid_y = df["gwl_deseasonalized"].dropna()
                         if len(valid_y) > 1:
                             x = np.arange(len(valid_y))
-                            slope, _, r_value, p_value, _ = linregress(x, valid_y.values)
+                            slope, _, r_value, _, _ = linregress(x, valid_y.values)
                             statistics["gwl_trend"] = {
                                 "slope_per_year": round(float(slope * 12), 4),
                                 "r_squared": round(float(r_value ** 2), 3),
-                                "p_value": round(float(p_value), 4),
-                                "direction": "declining" if slope > 0 else "recovering",
-                                "significance": "significant" if p_value < 0.05 else "not_significant"
+                                "direction": "declining" if slope > 0 else "recovering"
                             }
                 except Exception as e:
                     print(f"GWL decomp error: {e}")
@@ -2369,6 +2578,16 @@ def get_wells_timeseries(
             
             # Convert to dictionary records
             output_timeseries = df.to_dict("records")
+            
+            # Add monthly rainfall totals for Raw view (matches Dash reference)
+            if view == "raw":
+                for record in output_timeseries:
+                    if record.get("avg_rainfall") is not None:
+                        period = pd.to_datetime(record["date"])
+                        days_in_month = period.days_in_month
+                        record["monthly_rainfall_total_mm"] = round(
+                            record["avg_rainfall"] * days_in_month, 2
+                        )
 
             result = {
                 "view": view,
@@ -2383,8 +2602,94 @@ def get_wells_timeseries(
                 },
                 "timeseries": output_timeseries,
                 "statistics": statistics,
+                "interpretations": {
+                    "gwl_trend": {
+                        "what_is_slope": "Rate of groundwater level change over time",
+                        "slope_meaning": {
+                            "positive_slope": "Declining groundwater (water table getting DEEPER - concerning)",
+                            "negative_slope": "Recovering groundwater (water table getting SHALLOWER - good sign)"
+                        },
+                        "r_squared_meaning": "How well the trendline fits the data (0-1 scale, higher = better fit)",
+                        "r_squared_ranges": {
+                            "0.0_to_0.3": "Weak trend - high variability, trend not reliable",
+                            "0.3_to_0.7": "Moderate trend - data follows trend with some variation",
+                            "0.7_to_1.0": "Strong trend - data closely follows the trend"
+                        },
+                        "current_values": statistics.get("gwl_trend", {})
+                    } if "gwl_trend" in statistics else None,
+                    "grace_trend": {
+                        "what_is_slope": "Rate of total water storage change (groundwater + soil moisture + surface water)",
+                        "slope_meaning": {
+                            "positive_slope": "Water storage increasing (more water in the ground)",
+                            "negative_slope": "Water storage decreasing (water being depleted)"
+                        },
+                        "r_squared_meaning": "How well the trendline fits the data",
+                        "current_values": statistics.get("grace_trend", {})
+                    } if "grace_trend" in statistics else None,
+                    "actionable_insights": []
+                },
                 "cache_hit": False
             }
+            
+            # Add actionable insights based on trends
+            insights = []
+            if "gwl_trend" in statistics:
+                gwl = statistics["gwl_trend"]
+                slope = gwl["slope_per_year"]
+                r2 = gwl.get("r_squared", 0)
+                
+                # Use R² threshold instead of p-value (R² > 0.3 indicates meaningful trend)
+                if r2 > 0.3:  # Meaningful trend
+                    if slope > 0:  # Declining (bad)
+                        severity = "CRITICAL" if slope > 2 else ("HIGH" if slope > 1 else "MODERATE")
+                        insights.append({
+                            "severity": severity,
+                            "metric": "Groundwater Level",
+                            "finding": f"Water table declining at {abs(slope):.2f}m per year",
+                            "meaning": "Groundwater is being depleted faster than it's being recharged",
+                            "recommendation": "Consider: Rainwater harvesting, reduced pumping, managed aquifer recharge",
+                            "confidence": "High" if r2 > 0.7 else "Moderate"
+                        })
+                    else:  # Recovering (good)
+                        insights.append({
+                            "severity": "POSITIVE",
+                            "metric": "Groundwater Level",
+                            "finding": f"Water table recovering at {abs(slope):.2f}m per year",
+                            "meaning": "Groundwater recharge exceeds extraction",
+                            "recommendation": "Maintain current water management practices",
+                            "confidence": "High" if r2 > 0.7 else "Moderate"
+                        })
+                else:
+                    insights.append({
+                        "severity": "INFO",
+                        "metric": "Groundwater Level",
+                        "finding": "No clear long-term trend detected",
+                        "meaning": "Water levels relatively stable or highly variable (Low R² = weak trend fit)"
+                    })
+            
+            if "grace_trend" in statistics:
+                grace = statistics["grace_trend"]
+                slope = grace["slope_per_year"]
+                r2 = grace.get("r_squared", 0)
+                
+                if abs(slope) > 0.5 and r2 > 0.5:  # Meaningful trend
+                    if slope < 0:  # Decreasing storage (bad)
+                        insights.append({
+                            "severity": "WARNING",
+                            "metric": "Total Water Storage (GRACE)",
+                            "finding": f"Water storage declining at {abs(slope):.2f} cm per year",
+                            "meaning": "Combined groundwater, soil moisture, and surface water decreasing",
+                            "recommendation": "Comprehensive water conservation needed across all sources"
+                        })
+                    else:  # Increasing storage (good)
+                        insights.append({
+                            "severity": "POSITIVE",
+                            "metric": "Total Water Storage (GRACE)",
+                            "finding": f"Water storage increasing at {slope:.2f} cm per year",
+                            "meaning": "Overall water availability improving"
+                        })
+            
+            result["interpretations"]["actionable_insights"] = insights
             
             # Cache this view
             TIMESERIES_CACHE.set(view_cache_key, result)
@@ -2395,64 +2700,42 @@ def get_wells_timeseries(
             
             return result
     
-    elif view == "raw":
-        print("  📦 Preparing raw view...")
-        enhanced_timeseries = []
-        for _, row in combined.iterrows():
-            item = {
-                "date": row["period"].isoformat(),
-                "avg_gwl": round(float(row["avg_gwl"]), 2) if pd.notna(row["avg_gwl"]) else None,
-                "avg_tws": round(float(row["avg_tws"]), 2) if pd.notna(row["avg_tws"]) else None,
-                "avg_rainfall": round(float(row["avg_rainfall"]), 2) if pd.notna(row["avg_rainfall"]) else None,
-            }
-            
-            date = pd.to_datetime(row["period"])
-            days_in_month = date.days_in_month
-            item["days_in_month"] = days_in_month
-            
-            if pd.notna(row.get("avg_rainfall")):
-                item["monthly_rainfall_mm"] = round(float(row["avg_rainfall"]) * days_in_month, 2)
-            
-            enhanced_timeseries.append(item)
+    else:  # view == "raw"
+        print(f"  📊 Returning raw data (no decomposition needed)...")
+        df = combined.copy()
         
-        statistics = {}
+        # Prepare final output
+        df["date"] = df["period"].apply(lambda x: x.isoformat())
         
-        for col, name in [("avg_gwl", "gwl"), ("avg_tws", "grace"), ("avg_rainfall", "rainfall")]:
-            if col in combined.columns:
-                series = combined[col].dropna()
-                if len(series) >= 2:
-                    x = np.arange(len(series))
-                    y = series.values
-                    slope, intercept, r_value, p_value, std_err = linregress(x, y)
-                    
-                    statistics[f"{name}_trend"] = {
-                        "mean": round(float(np.mean(y)), 2),
-                        "min": round(float(np.min(y)), 2),
-                        "max": round(float(np.max(y)), 2),
-                        "std": round(float(np.std(y)), 2),
-                        "slope_per_year": round(float(slope * 12), 4),
-                        "r_squared": round(float(r_value ** 2), 3),
-                        "p_value": round(float(p_value), 4),
-                        "direction": "declining" if slope > 0 else "recovering",
-                        "significance": "significant" if p_value < 0.05 else "not_significant"
-                    }
+        # Replace NaN with None for JSON compliance
+        df = df.replace({np.nan: None})
+        
+        # Convert to dictionary records
+        output_timeseries = df.to_dict("records")
+        
+        # Add monthly rainfall totals for Raw view (matches Dash reference)
+        for record in output_timeseries:
+            if record.get("avg_rainfall") is not None:
+                period = pd.to_datetime(record["date"])
+                days_in_month = period.days_in_month
+                record["monthly_rainfall_total_mm"] = round(
+                    record["avg_rainfall"] * days_in_month, 2
+                )
         
         result = {
             "view": view,
-            "aggregation": aggregation,
+            "aggregation": "monthly",
             "filters": {"state": state, "district": district},
-            "count": len(enhanced_timeseries),
+            "count": len(output_timeseries),
             "chart_config": {
                 "gwl_chart_type": "line",
                 "grace_chart_type": "line",
-                "rainfall_chart_type": "bar",
-                "rainfall_field": "monthly_rainfall_mm",
-                "rainfall_unit": "mm/month",
+                "rainfall_chart_type": "bar",  # Bar for raw view
                 "gwl_y_axis_reversed": True
             },
-            "timeseries": enhanced_timeseries,
-            "statistics": statistics,
-            "note": "Unified timeseries combining Wells, GRACE, and Rainfall data",
+            "timeseries": output_timeseries,
+            "statistics": None,  # No statistics for raw view
+            "interpretations": None,  # No interpretations for raw view
             "cache_hit": False
         }
         
@@ -2461,20 +2744,9 @@ def get_wells_timeseries(
         
         elapsed = (datetime.now() - start_time).total_seconds()
         result["response_time_seconds"] = round(elapsed, 2)
-        print(f"  ✅ Complete in {elapsed:.2f}s")
+        print(f"  ✅ Raw view complete in {elapsed:.2f}s")
         
         return result
-    
-    else:
-        return {
-            "view": view,
-            "aggregation": aggregation,
-            "filters": {"state": state, "district": district},
-            "count": len(combined),
-            "timeseries": combined.to_dict("records"),
-            "statistics": None,
-            "error": f"Need at least 24 months of data for {view} view (have {len(combined)} months)"
-        }
         
 @app.get("/api/wells/summary")
 def get_wells_summary(
@@ -2964,6 +3236,22 @@ def get_grace(
             total_area = sum(p["cell_area_km2"] for p in filtered_points)
             regional_avg = round(total_weighted_lwe / total_area, 3) if total_area > 0 else None
         
+        
+        # Apply interpolation to increase point density (handles all cases: 1→3, 2→6, 3+→~2x)
+        try:
+            filtered_points = interpolate_grid_points(filtered_points, value_key="lwe_cm")
+            
+            # Re-filter to remove any interpolated points that went outside boundary
+            if prepared_boundary and len(filtered_points) > 0:
+                points_before_refilter = len(filtered_points)
+                filtered_points = filter_points_by_boundary(filtered_points, prepared_boundary)
+                points_removed = points_before_refilter - len(filtered_points)
+                if points_removed > 0:
+                    print(f"Boundary re-filter: Removed {points_removed} interpolated points outside boundary")
+        except Exception as e:
+            print(f"Interpolation skipped: {e}")
+        
+        
         if sample_rate > 1 and len(filtered_points) > 0:
             filtered_points = filtered_points[::sample_rate]
         
@@ -3094,6 +3382,22 @@ def get_rainfall(
         regional_avg = None
         if len(filtered_points) > 0:
             regional_avg = round(sum(p["rainfall_mm"] for p in filtered_points) / len(filtered_points), 2)
+        
+        
+        # Apply interpolation to increase point density (handles all cases: 1→3, 2→6, 3+→~2x)
+        try:
+            filtered_points = interpolate_grid_points(filtered_points, value_key="rainfall_mm")
+            
+            # Re-filter to remove any interpolated points that went outside boundary
+            if prepared_boundary and len(filtered_points) > 0:
+                points_before_refilter = len(filtered_points)
+                filtered_points = filter_points_by_boundary(filtered_points, prepared_boundary)
+                points_removed = points_before_refilter - len(filtered_points)
+                if points_removed > 0:
+                    print(f"    → Boundary re-filter: Removed {points_removed} points outside boundary (kept {len(filtered_points)})")
+        except Exception as e:
+            print(f"Interpolation skipped: {e}")
+        
         
         if sample_rate > 1 and len(filtered_points) > 0:
             filtered_points = filtered_points[::sample_rate]
@@ -5177,11 +5481,11 @@ def rainfall_gwl_lag_correlation(
 def decline_hotspot_clustering(
     state: Optional[str] = Query(None),
     district: Optional[str] = Query(None),
-    eps_km: Optional[float] = Query(None, ge=5.0, le=100.0),
-    min_samples: int = Query(5, ge=2, le=50)
+    debug: bool = Query(False, description="Enable debug output")
 ):
     """
     Identify spatially clustered declining well sites using DBSCAN
+    Matches Dash implementation exactly
     """
     try:
         boundary_geojson = get_boundary_geojson(state, district)
@@ -5217,8 +5521,72 @@ def decline_hotspot_clustering(
         
         slopes_df = pd.DataFrame(site_slopes)
         
-        # Filter to declining sites only (positive slope = deeper = decline)
+        # ✅ Filter to declining sites only (MATCHES DASH)
         declining = slopes_df[slopes_df['slope_m_per_year'] > 0].copy()
+        
+        # 🔍 DEBUG: Print total sites
+        if debug:
+            print(f"\n{'='*60}")
+            print(f"HOTSPOT DEBUG: {state or 'All'} - {district or 'All'}")
+            print(f"{'='*60}")
+            print(f"Total sites with slopes: {len(slopes_df)}")
+            print(f"Declining sites (slope > 0): {len(declining)}")
+        
+        # ✅ Get bounds from boundary (MATCHES DASH)
+        if boundary_geojson:
+            try:
+                boundary_gdf = gpd.GeoDataFrame.from_features(
+                    json.loads(boundary_geojson)['features'], 
+                    crs="EPSG:4326"
+                )
+                bounds = boundary_gdf.total_bounds  # [x0, y0, x1, y1]
+                if debug:
+                    print(f"Bounds from boundary GeoJSON: {bounds}")
+            except Exception as e:
+                if debug:
+                    print(f"Boundary parse error: {e}, using point cloud")
+                coords = declining[['latitude', 'longitude']].values
+                bounds = np.array([
+                    coords[:, 1].min(),  # x0 (lon)
+                    coords[:, 0].min(),  # y0 (lat)
+                    coords[:, 1].max(),  # x1 (lon)
+                    coords[:, 0].max()   # y1 (lat)
+                ])
+        else:
+            coords = declining[['latitude', 'longitude']].values
+            bounds = np.array([
+                coords[:, 1].min(),
+                coords[:, 0].min(),
+                coords[:, 1].max(),
+                coords[:, 0].max()
+            ])
+            if debug:
+                print(f"Bounds from point cloud: {bounds}")
+        
+        # ✅ Calculate eps from diagonal in DEGREES (MATCHES DASH)
+        x0, y0, x1, y1 = bounds
+        diag = np.hypot(x1 - x0, y1 - y0)  # Diagonal in degrees
+        eps_deg = np.clip(0.05 * diag, 0.02, 0.3)  # 5% of diagonal
+        eps_rad = np.deg2rad(eps_deg)
+        eps_km_approx = eps_deg * 111  # Approximate conversion at equator
+        
+        # 🔍 DEBUG: Print epsilon calculation
+        if debug:
+            print(f"\nEpsilon Calculation:")
+            print(f"  Diagonal (degrees): {diag:.6f}")
+            print(f"  5% of diagonal: {0.05 * diag:.6f}")
+            print(f"  eps_deg (clipped 0.02-0.3): {eps_deg:.6f}")
+            print(f"  eps_rad: {eps_rad:.6f}")
+            print(f"  eps_km (approx): {eps_km_approx:.2f} km")
+        
+        # ✅ Adaptive min_samples (MATCHES DASH)
+        min_samples = max(5, int(len(declining) * 0.04))  # 4% of declining sites
+        
+        # 🔍 DEBUG: Print min_samples
+        if debug:
+            print(f"\nMin Samples Calculation:")
+            print(f"  4% of {len(declining)} declining sites = {len(declining) * 0.04:.1f}")
+            print(f"  min_samples = max(5, {int(len(declining) * 0.04)}) = {min_samples}")
         
         if len(declining) < min_samples:
             raise HTTPException(
@@ -5226,22 +5594,27 @@ def decline_hotspot_clustering(
                 detail=f"Only {len(declining)} declining sites found, need at least {min_samples}"
             )
         
-        # Auto-determine eps if not provided
-        if eps_km is None:
-            # Base eps on AOI size
-            coords = declining[['latitude', 'longitude']].values
-            lat_range = coords[:, 0].max() - coords[:, 0].min()
-            lon_range = coords[:, 1].max() - coords[:, 1].min()
-            diagonal_deg = np.sqrt(lat_range**2 + lon_range**2)
-            eps_km = np.clip(0.05 * diagonal_deg * 111, 5, 50)  # 5% of diagonal, 5-50km range
-        
-        # DBSCAN clustering
+        # ✅ DBSCAN clustering (MATCHES DASH)
         coords_rad = np.radians(declining[['latitude', 'longitude']].values)
-        R_earth = 6371.0
-        eps_rad = eps_km / R_earth
+        
+        # 🔍 DEBUG: Print coords info
+        if debug:
+            print(f"\nCoordinates:")
+            print(f"  Shape: {coords_rad.shape}")
+            print(f"  Lat range: {declining['latitude'].min():.4f} to {declining['latitude'].max():.4f}")
+            print(f"  Lon range: {declining['longitude'].min():.4f} to {declining['longitude'].max():.4f}")
         
         clustering = DBSCAN(eps=eps_rad, min_samples=min_samples, metric='haversine').fit(coords_rad)
         declining['cluster'] = clustering.labels_
+        
+        # 🔍 DEBUG: Print clustering results
+        if debug:
+            unique_clusters = sorted(declining['cluster'].unique())
+            print(f"\nClustering Results:")
+            print(f"  Unique cluster labels: {unique_clusters}")
+            print(f"  Number of clusters (excluding -1): {len([c for c in unique_clusters if c != -1])}")
+            print(f"  Noise points (cluster -1): {(declining['cluster'] == -1).sum()}")
+            print(f"  Clustered points: {(declining['cluster'] != -1).sum()}")
         
         # Statistics per cluster
         cluster_stats = []
@@ -5259,65 +5632,69 @@ def decline_hotspot_clustering(
                 "centroid_lat": round(float(cluster_sites['latitude'].mean()), 6),
                 "centroid_lon": round(float(cluster_sites['longitude'].mean()), 6)
             })
+            
+            # 🔍 DEBUG: Print each cluster
+            if debug:
+                print(f"\n  Cluster {cluster_id}:")
+                print(f"    Sites: {len(cluster_sites)}")
+                print(f"    Mean slope: {cluster_sites['slope_m_per_year'].mean():.4f} m/yr")
+                print(f"    Centroid: ({cluster_sites['latitude'].mean():.4f}, {cluster_sites['longitude'].mean():.4f})")
+        
+        if debug:
+            print(f"{'='*60}\n")
         
         # Convert results
         results = declining.to_dict('records')
         
-        return {
+        response = {
             "module": "HOTSPOTS",
-            "description": "Spatial clustering of declining well sites",
+            "description": "Spatial clustering of declining well sites (Dash-aligned)",
             "filters": {"state": state, "district": district},
             "parameters": {
-                "eps_km": round(eps_km, 2),
-                "min_samples": min_samples,
+                "eps_deg": round(float(eps_deg), 6),
+                "eps_km_approx": round(float(eps_km_approx), 2),
+                "min_samples": int(min_samples),
                 "algorithm": "DBSCAN",
-                "metric": "haversine"
+                "metric": "haversine",
+                "diagonal_deg": round(float(diag), 6)
             },
             "statistics": {
                 "total_declining_sites": len(declining),
                 "n_clusters": len(cluster_stats),
                 "noise_points": int((declining['cluster'] == -1).sum()),
                 "clustered_points": int((declining['cluster'] != -1).sum()),
-                "clustering_rate": round(int((declining['cluster'] != -1).sum()) / len(declining) * 100, 1)
+                "clustering_rate": round(float((declining['cluster'] != -1).sum()) / float(len(declining)) * 100.0, 1)
             },
             "clusters": cluster_stats,
             "count": len(results),
             "data": results,
             
-            # ✅ ADDED
             "methodology": {
-                "approach": "DBSCAN (Density-Based Spatial Clustering) for hotspot identification",
+                "approach": "DBSCAN (Density-Based Spatial Clustering) - Dash-aligned",
                 "steps": [
                     f"1. Calculated trend slopes for all sites (need ≥6 observations)",
                     f"2. Filtered to {len(declining)} declining sites (positive slope = deeper GWL)",
-                    f"3. Applied DBSCAN with ε={round(eps_km, 2)}km, min_samples={min_samples}",
-                    "4. Used haversine distance metric (accounts for Earth curvature)",
-                    f"5. Identified {len(cluster_stats)} clusters of spatially concentrated decline"
+                    f"3. Calculated eps from AOI diagonal: {eps_deg:.4f}° ≈ {eps_km_approx:.1f}km",
+                    f"4. Adaptive min_samples: {min_samples} (4% of declining sites, min 5)",
+                    f"5. Applied DBSCAN with haversine distance metric",
+                    f"6. Identified {len(cluster_stats)} clusters"
                 ],
                 "parameters_meaning": {
-                    "eps": f"{round(eps_km, 2)}km - Maximum distance between sites in same cluster",
-                    "min_samples": f"{min_samples} - Minimum sites needed to form a cluster"
-                },
-                "noise_handling": "Sites not meeting density criteria labeled as noise (-1)"
-            },
-            
-            "interpretation": {
-                "cluster_meaning": "Spatially concentrated area of groundwater decline",
-                "hotspot_significance": [
-                    "Multiple nearby sites declining together",
-                    "May indicate shared stress factors (pumping, drought, policy)",
-                    "Priority zones for intervention"
-                ],
-                "noise_meaning": "Isolated declining sites (not part of spatial cluster)"
+                    "eps": f"{eps_deg:.4f}° (≈{eps_km_approx:.1f}km) - Max distance between sites",
+                    "min_samples": f"{min_samples} - Min sites per cluster (adaptive: 4% of dataset)"
+                }
             },
             
             "key_insights": [
                 f"{len(cluster_stats)} decline hotspots identified",
                 f"{int((declining['cluster'] != -1).sum())} sites clustered ({round(int((declining['cluster'] != -1).sum()) / len(declining) * 100, 1)}% of declining sites)",
                 f"{int((declining['cluster'] == -1).sum())} isolated decline sites (noise)",
-                f"Largest cluster: {max(cluster_stats, key=lambda x: x['n_sites'])['n_sites'] if cluster_stats else 0} sites"
+                f"Largest cluster: {max(cluster_stats, key=lambda x: x['n_sites'])['n_sites'] if cluster_stats else 0} sites",
+                f"Epsilon auto-scaled to {eps_deg:.4f}° based on AOI size"
             ]
         }
+        
+        return response
     
     except HTTPException:
         raise
