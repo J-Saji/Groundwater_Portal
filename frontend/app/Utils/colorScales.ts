@@ -130,7 +130,8 @@ export const getDivergenceColor = (value: number): string => {
 };
 
 export const getHotspotColor = (cluster: number): string => {
-  if (cluster === -1) return "#9CA3AF";
+  // All negative cluster IDs are noise points
+  if (cluster < 0) return "#9CA3AF";  // Gray for noise
   return COLOR_PALETTE[cluster % COLOR_PALETTE.length];
 };
 

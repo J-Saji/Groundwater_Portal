@@ -1,8 +1,8 @@
 import { useCallback } from 'react';
-import { 
-  MapContext, 
-  AquiferType, 
-  GraceResponse, 
+import {
+  MapContext,
+  AquiferType,
+  GraceResponse,
   GracePoint,
   RainfallResponse,
   RainfallPoint,
@@ -97,7 +97,7 @@ export function useMapContext({
   selectedMonth,
   selectedSeason
 }: UseMapContextProps): MapContext {
-  
+
   const buildMapContext = useCallback((): MapContext => {
     const activeLayers: string[] = [];
     if (showAquifers) activeLayers.push("aquifers");
@@ -127,7 +127,7 @@ export function useMapContext({
     // GRACE context
     if (showGrace && graceResponse) {
       const graceValues = graceData.map(p => p.lwe_cm);
-      
+
       dataSummary.grace = {
         year: graceResponse.year,
         month: graceResponse.month,
@@ -150,7 +150,7 @@ export function useMapContext({
     // Rainfall context
     if (showRainfall && rainfallResponse) {
       const rainfallValues = rainfallData.map(p => p.rainfall_mm);
-      
+
       dataSummary.rainfall = {
         year: rainfallResponse.year,
         month: rainfallResponse.month,
@@ -340,9 +340,9 @@ export function useMapContext({
     };
   }, [
     showAquifers, showGrace, showRainfall, showWells, showTimeseries, showGWR, showStorageVsGWR,
-    aquifers, graceResponse, graceData, rainfallResponse, rainfallData, 
+    aquifers, graceResponse, graceData, rainfallResponse, rainfallData,
     wellsResponse, wellsData, summaryData, timeseriesResponse, gwrData, storageVsGwrData,
-    selectedAdvancedModule, asiData, networkDensityData, sassData, 
+    selectedAdvancedModule, asiData, networkDensityData, sassData,
     divergenceData, forecastData, rechargeData, significantTrendsData,
     changepointsData, lagCorrelationData, hotspotsData,
     selectedState, selectedDistrict, selectedYear, selectedMonth, selectedSeason

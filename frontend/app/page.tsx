@@ -128,6 +128,8 @@ export default function Home() {
 
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(true);
+  const [isTimeseriesMinimized, setIsTimeseriesMinimized] = useState(false);
+  const [isStorageVsGWRMinimized, setIsStorageVsGWRMinimized] = useState(false);
 
   const showAlert = (message: string, type: "info" | "warning" | "error" | "success" = "info") => {
     setAlertMessage(message);
@@ -614,6 +616,9 @@ export default function Home() {
     return null;
   };
 
+  // Determine if split view is active (advanced module showing)
+  const isSplitViewActive = !!selectedAdvancedModule;
+
   return (
     <div className="min-h-screen bg-slate-100">
       {alertMessage && (
@@ -679,37 +684,50 @@ export default function Home() {
 
       {/* Main Content Area */}
       <div
-        className={`transition-all duration-300 ${showAquifers || showGWR || showGrace || showRainfall || showWells ||
-            selectedAdvancedModule || showTimeseries || showStorageVsGWR
-            ? 'pt-14 pb-6 px-6'
-            : 'pt-14'
+        className={`transition-all duration-300 ${showTimeseries || showStorageVsGWR
+            ? 'p-4'
+            : (showAquifers || showGWR || showGrace || showRainfall || showWells || selectedAdvancedModule ? 'p-2' : '')
           } ${isSidebarExpanded ? 'ml-80' : 'ml-14'}`}
         style={{ height: 'calc(100vh - 3.5rem)' }}
       >
         {(showAquifers || showGWR || showGrace || showRainfall || showWells || selectedAdvancedModule) ? (
-          // Split View: Plain India Map (Left) + Layer-Specific Map (Right)
-          <div className="h-full grid grid-cols-2 gap-6">
-            {/* Left: Plain India Map - No Layers */}
+          // Split View: India Map (Left) + Layer-Specific Map or Advanced Module (Right)
+          <div className="h-full grid grid-cols-2 gap-4">
+            {/* Left: India Map - Shows layers when advanced module is open, otherwise plain overview */}
             <div className="h-full relative" style={{ zIndex: 1 }}>
-              <div className="h-full w-full rounded-lg overflow-hidden shadow-xl border-2 border-slate-300 relative">
+              <div className="h-full w-full rounded-lg overflow-hidden shadow-lg border border-slate-200 relative">
                 <IndiaMap
-                  center={[22.9734, 78.6569]}
-                  zoom={5}
-                  mapKey={0}
-                  districtGeo={null}
-                  aquifers={[]}
-                  graceData={[]}
-                  rainfallData={[]}
-                  wellsData={[]}
-                  gwrData={null}
-                  showAquifers={false}
-                  showGrace={false}
-                  showRainfall={false}
-                  showWells={false}
-                  showGWR={false}
+                  center={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? center : [22.9734, 78.6569]}
+                  zoom={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? zoom : 5}
+                  mapKey={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? mapKey : 0}
+                  districtGeo={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? districtGeo : null}
+                  aquifers={selectedAdvancedModule && showAquifers ? aquifers : []}
+                  graceData={selectedAdvancedModule && showGrace ? graceData : []}
+                  rainfallData={selectedAdvancedModule && showRainfall ? rainfallData : []}
+                  wellsData={selectedAdvancedModule && showWells ? wellsData : []}
+                  gwrData={selectedAdvancedModule && showGWR ? gwrData : null}
+                  showAquifers={selectedAdvancedModule ? showAquifers : false}
+                  showGrace={selectedAdvancedModule ? showGrace : false}
+                  showRainfall={selectedAdvancedModule ? showRainfall : false}
+                  showWells={selectedAdvancedModule ? showWells : false}
+                  showGWR={selectedAdvancedModule ? showGWR : false}
                 />
                 <div className="absolute top-3 left-3 bg-white px-3 py-1.5 rounded-md shadow-md border border-slate-300">
-                  <p className="text-xs font-semibold text-slate-700">India Overview</p>
+                  <p className="text-xs font-semibold text-slate-700">
+                    {selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? (
+                      <>
+                        {showAquifers && 'Aquifers Layer'}
+                        {showGWR && 'GWR Layer'}
+                        {showGrace && 'GRACE Layer'}
+                        {showRainfall && 'Rainfall Layer'}
+                        {showWells && 'Wells Layer'}
+                        {selectedState && ` - ${selectedState}`}
+                        {selectedDistrict && ` / ${selectedDistrict}`}
+                      </>
+                    ) : (
+                      'India Overview'
+                    )}
+                  </p>
                 </div>
               </div>
             </div>
@@ -726,7 +744,7 @@ export default function Home() {
                 </AdvancedModulePanel>
               ) : (
                 // Regular Layer Map (Zoomed to selected state/district)
-                <div className="h-full w-full rounded-lg overflow-hidden shadow-xl border-2 border-blue-400 relative">
+                <div className="h-full w-full rounded-lg overflow-hidden shadow-lg border border-blue-300 relative">
                   <IndiaMap
                     center={center}
                     zoom={zoom}
@@ -780,24 +798,150 @@ export default function Home() {
           </div>
         )}
 
-        {/* Timeseries Chart - Below maps when active */}
-        {showTimeseries && timeseriesResponse && (
-          <div className="mt-6">
-            <Timeseries
-              timeseriesResponse={timeseriesResponse}
-              timeseriesView={timeseriesView}
-              onViewChange={setTimeseriesView}
-            />
-          </div>
-        )}
-
-        {/* Storage vs GWR Chart - Below maps when active */}
-        {showStorageVsGWR && storageVsGwrData && (
-          <div className="mt-6">
-            <StorageVsGWR storageVsGwrData={storageVsGwrData} />
+        {/* Timeseries Chart - Inline (when no split view) */}
+        {!isSplitViewActive && showTimeseries && timeseriesResponse && (
+          <div className="mt-4">
+            <div className="bg-white rounded-lg shadow-lg border border-slate-200 overflow-hidden">
+              <div className="bg-indigo-600 text-white px-4 py-2.5 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+                  </svg>
+                  <h3 className="font-semibold text-sm">Timeseries Analysis</h3>
+                </div>
+                <button
+                  onClick={() => setShowTimeseries(false)}
+                  className="hover:bg-indigo-700 p-1 rounded transition-colors"
+                  title="Close"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <div className="p-4">
+                <Timeseries
+                  timeseriesResponse={timeseriesResponse}
+                  timeseriesView={timeseriesView}
+                  onViewChange={setTimeseriesView}
+                />
+              </div>
+            </div>
           </div>
         )}
       </div>
+
+      {/* Floating Timeseries - Only when split view is active */}
+      {isSplitViewActive && showTimeseries && timeseriesResponse && (
+        <div className={`fixed ${isSidebarExpanded ? 'left-80' : 'left-14'} right-6 bottom-6 transition-all duration-300 z-30`}>
+          {isTimeseriesMinimized ? (
+            // Minimized Badge
+            <button
+              onClick={() => setIsTimeseriesMinimized(false)}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 rounded-lg shadow-lg flex items-center justify-center gap-2 transition-all"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+              </svg>
+              <span className="font-semibold">Show Timeseries Analysis</span>
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+              </svg>
+            </button>
+          ) : (
+            // Expanded Panel
+            <div className="bg-white rounded-lg shadow-2xl border border-slate-200 overflow-hidden max-h-[60vh]">
+              <div className="bg-indigo-600 text-white px-4 py-2.5 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+                  </svg>
+                  <h3 className="font-semibold text-sm">Timeseries Analysis</h3>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setIsTimeseriesMinimized(true)}
+                    className="hover:bg-indigo-700 p-1 rounded transition-colors"
+                    title="Minimize"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={() => setShowTimeseries(false)}
+                    className="hover:bg-indigo-700 p-1 rounded transition-colors"
+                    title="Close"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div className="p-4 overflow-y-auto max-h-[50vh]">
+                <Timeseries
+                  timeseriesResponse={timeseriesResponse}
+                  timeseriesView={timeseriesView}
+                  onViewChange={setTimeseriesView}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {/* Storage vs GWR Chart - Floating Panel */}
+      {showStorageVsGWR && storageVsGwrData && (
+        <div className={`fixed ${isSidebarExpanded ? 'left-80' : 'left-14'} bottom-6 transition-all duration-300 z-30 ${isStorageVsGWRMinimized ? 'w-auto' : 'right-6'}`}>
+          {isStorageVsGWRMinimized ? (
+            // Minimized Badge
+            <button
+              onClick={() => setIsStorageVsGWRMinimized(false)}
+              className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 transition-all"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              <span className="font-medium text-sm">Storage vs GWR</span>
+            </button>
+          ) : (
+            // Expanded Panel
+            <div className="bg-white rounded-lg shadow-2xl border border-slate-300 overflow-hidden">
+              <div className="bg-purple-600 text-white px-4 py-2.5 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                  <h3 className="font-semibold text-sm">Storage vs GWR Comparison</h3>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setIsStorageVsGWRMinimized(true)}
+                    className="hover:bg-purple-700 p-1 rounded transition-colors"
+                    title="Minimize"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={() => setShowStorageVsGWR(false)}
+                    className="hover:bg-purple-700 p-1 rounded transition-colors"
+                    title="Close"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div className="p-4 max-h-96 overflow-y-auto">
+                <StorageVsGWR storageVsGwrData={storageVsGwrData} />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ChatBot - Positioned at bottom right */}
       <ChatBot
