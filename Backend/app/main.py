@@ -53,7 +53,7 @@ try:
     MK_AVAILABLE = True
 except ImportError:
     MK_AVAILABLE = False
-    print("⚠️  pymannkendall not available - Mann-Kendall test disabled")
+    print("⚠️  pymannkendall not available - Mann-Kzendall test disabled")
 
 # ============= CHATBOT IMPORTS =============
 try:
@@ -206,39 +206,31 @@ if CHATBOT_AVAILABLE:
         )
 
         # 3. Step A: Contextualize Question Chain (Rewriter)
-        contextualize_q_system_prompt = """You are helping reformulate user questions for a technical hydrogeology Q&A system.
+        contextualize_q_system_prompt = """Given a chat history and a user question, reformulate the question to be standalone if needed.
 
-            MOST IMPORTANT RULE: If the question is already clear and standalone, return it EXACTLY as-is. Do not add extra context.
+Rules:
+1. If question is already clear and standalone → Return it EXACTLY as given
+2. If question has pronouns ("it", "this", "that") → Replace with specific topic from history
+3. If question references previous context → Add that context
+4. Never add extra details not in the original question
+5. Keep the same question style and brevity
 
-            Your task: ONLY reformulate if the question has pronouns like "it", "this", "that" or references like "the previous" that need clarification.
+Output ONLY the reformulated question, nothing else.
 
-            CRITICAL RULES:
-            1. **Check First**: Does this question need reformulation? If no pronouns/references → return original
-            2. **Preserve Everything**: Keep exact wording, question type, depth level
-            3. **Only Add What's Missing**: If "it" → replace with specific topic from history. Nothing more.
-            4. **Don't Hallucinate**: Never add topics not in the original question
+Examples:
+Q: "how does it work?" [History: discussing GRACE data]
+A: How does GRACE data work?
 
-            Examples:
-            ❌ BAD:
-            User: "what about the rainfall trend and gwl trend"
-            Rewritten: "Explain in detail how the GRACE satellite data trend analysis..." (WRONG - added GRACE, added "explain in detail")
+Q: "what about rainfall trends?" [No pronouns]
+A: what about rainfall trends?
 
-            ✅ GOOD:
-            User: "what about the rainfall trend and gwl trend" [Context: discussing Kerala]
-            Rewritten: "What about the rainfall trend and GWL trend in Kerala?" (Just added location)
+Q: "compare this to last year" [Current: Kerala 2023]
+A: compare Kerala 2023 to 2022
 
-            ❌ BAD:
-            User: "how does it work?"
-            Rewritten: "Explain the complete methodology of groundwater analysis" (WRONG - changed question type and scope)
-
-            ✅ GOOD:
-            User: "how does it work?" [Context: GRACE data]
-            Rewritten: "How does GRACE data work?"
-
-            Now reformulate this question:"""
+Now reformulate:"""
 
         contextualize_q_prompt = PromptTemplate(
-            template=contextualize_q_system_prompt + "\n\nChat History:\n{chat_history}\n\nUser Question: {question}\n\nStandalone Question:",
+            template=contextualize_q_system_prompt + "\n\nChat History:\n{chat_history}\n\nUser Question: {question}\n\nReformulated Question:",
             input_variables=["chat_history", "question"]
         )
 
@@ -335,14 +327,14 @@ def auto_detect_grace_bands():
     print("🔍 Auto-detecting GRACE band mappings...")
     try:
         with engine.connect() as conn:
-            total_bands_query = text("SELECT ST_NumBands(rast) FROM lwe_thickness_india WHERE rid = 1;")
+            total_bands_query = text("SELECT ST_NumBands(rast) FROM public.grace_lwe WHERE rid = 1;")
             total_bands = conn.execute(total_bands_query).fetchone()[0]
             base_date = datetime(2002, 1, 1)
             for band in range(1, total_bands + 1):
                 check_query = text(f"""
                     SELECT COUNT(*) FROM (
                         SELECT (ST_PixelAsCentroids(rast, {band})).val as val
-                        FROM lwe_thickness_india WHERE rid = 1 LIMIT 10
+                        FROM public.grace_lwe WHERE rid = 1 LIMIT 10
                     ) sub WHERE val IS NOT NULL;
                 """)
                 has_data = conn.execute(check_query).fetchone()[0] > 0
@@ -378,14 +370,14 @@ def detect_rainfall_tables():
                 SELECT table_name 
                 FROM information_schema.tables 
                 WHERE table_schema = 'public' 
-                AND table_name LIKE 'rf25_ind%_rfp25'
+                AND table_name LIKE 'rainfall_%'
                 ORDER BY table_name;
             """)
             result = conn.execute(query)
             for row in result:
                 table_name = row[0]
                 import re
-                match = re.search(r'rf25_ind(\d{4})_rfp25', table_name)
+                match = re.search(r'rainfall_(\d{4})', table_name)
                 if match:
                     year = int(match.group(1))
                     RAINFALL_TABLES[year] = table_name
@@ -1033,7 +1025,7 @@ def query_grace_monthly(boundary_geojson: str = None):
                                 ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, unnest(ARRAY[{bands_str}]))).geom, 4326)) as latitude,
                                 (ST_PixelAsCentroids(rast, unnest(ARRAY[{bands_str}]))).val as lwe_cm,
                                 ST_SetSRID((ST_PixelAsCentroids(rast, unnest(ARRAY[{bands_str}]))).geom, 4326) as geom
-                            FROM lwe_thickness_india
+                            FROM public.grace_lwe
                             WHERE rid = 1
                         ) pixels
                         WHERE lwe_cm IS NOT NULL
@@ -1054,7 +1046,7 @@ def query_grace_monthly(boundary_geojson: str = None):
                                 unnest(ARRAY[{bands_str}]) as band_num,
                                 ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, unnest(ARRAY[{bands_str}]))).geom, 4326)) as latitude,
                                 (ST_PixelAsCentroids(rast, unnest(ARRAY[{bands_str}]))).val as lwe_cm
-                            FROM lwe_thickness_india
+                            FROM public.grace_lwe
                             WHERE rid = 1
                         ) pixels
                         WHERE lwe_cm IS NOT NULL
@@ -1364,7 +1356,7 @@ async def debug_raster_info(
                         ST_SRID(rast::geometry) as srid,
                         ST_Width(rast) as width,
                         ST_Height(rast) as height
-                    FROM lwe_thickness_india
+                    FROM public.grace_lwe
                     WHERE rid = 1
                 """)).fetchone()
                 
@@ -1373,7 +1365,7 @@ async def debug_raster_info(
                         rast::geometry,
                         ST_GeomFromGeoJSON(:boundary)
                     ) as intersects
-                    FROM lwe_thickness_india
+                    FROM public.grace_lwe
                     WHERE rid = 1
                 """), {"boundary": boundary_geojson}).fetchone()
                 
@@ -1381,7 +1373,7 @@ async def debug_raster_info(
                     WITH pixels AS (
                         SELECT 
                             (ST_PixelAsCentroids(rast, 1)).*
-                        FROM lwe_thickness_india
+                        FROM public.grace_lwe
                         WHERE rid = 1
                         LIMIT 10
                     )
@@ -1397,7 +1389,7 @@ async def debug_raster_info(
                     WITH pixels AS (
                         SELECT 
                             (ST_PixelAsCentroids(rast, 1)).*
-                        FROM lwe_thickness_india
+                        FROM public.grace_lwe
                         WHERE rid = 1
                     )
                     SELECT 
@@ -1505,7 +1497,6 @@ async def debug_raster_info(
 # =============================================================================
 # CHATBOT ENDPOINT
 # ============================================================================
-
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """
@@ -1936,11 +1927,11 @@ def get_all_aquifers():
     query = text("""
         SELECT 
             aquifer, aquifers, zone_m, mbgl, avg_mbgl,
-            m2_perday, m3_per_day, yeild__, per_cm, stname,
+            m2_perday, m3_per_day, yeild__, per_cm, state,
             ST_AsGeoJSON(geometry) AS geojson,
             ST_Y(ST_Centroid(geometry)) AS center_lat,
             ST_X(ST_Centroid(geometry)) AS center_lng
-        FROM public.major_aquifers
+        FROM public.aquifers
         ORDER BY aquifer;
     """)
     try:
@@ -1951,7 +1942,7 @@ def get_all_aquifers():
                     "aquifer": row[0], "aquifers": row[1], "zone_m": row[2],
                     "mbgl": row[3], "avg_mbgl": row[4], "m2_perday": row[5],
                     "m3_per_day": row[6], "yeild": row[7], "per_cm": row[8],
-                    "stname": row[9], "geometry": json.loads(row[10]),
+                    "state": row[9], "geometry": json.loads(row[10]),
                     "center": [row[11], row[12]] if row[11] and row[12] else None
                 }
                 for row in result
@@ -1978,16 +1969,16 @@ def get_aquifers_by_state(state_name: str):
             aquifer_query = text("""
                 SELECT 
                     a.aquifer, a.aquifers, a.zone_m, a.mbgl, a.avg_mbgl,
-                    a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.stname,
+                    a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.state,
                     ST_AsGeoJSON(ST_MakeValid(a.geometry)) AS geojson,
                     ST_Y(ST_Centroid(a.geometry)) AS center_lat,
                     ST_X(ST_Centroid(a.geometry)) AS center_lng
-                FROM public.major_aquifers a
+                FROM public.aquifers a
                 WHERE ST_Intersects(
                     ST_MakeValid(a.geometry),
                     ST_GeomFromGeoJSON(:state_geojson)
                 )
-                AND LOWER(a.stname) LIKE LOWER(:state_pattern)
+                AND LOWER(a.state) LIKE LOWER(:state_pattern)
                 ORDER BY a.aquifer;
             """)
             
@@ -2014,7 +2005,7 @@ def get_aquifers_by_state(state_name: str):
                         "aquifer": row[0], "aquifers": row[1], "zone_m": row[2],
                         "mbgl": row[3], "avg_mbgl": row[4], "m2_perday": row[5],
                         "m3_per_day": row[6], "yeild": row[7], "per_cm": row[8],
-                        "stname": row[9], "geometry": geom_json,
+                        "state": row[9], "geometry": geom_json,
                         "center": [row[11], row[12]] if row[11] and row[12] else None
                     })
                 except Exception as e:
@@ -2027,11 +2018,11 @@ def get_aquifers_by_state(state_name: str):
                 fallback_query = text("""
                     SELECT 
                         a.aquifer, a.aquifers, a.zone_m, a.mbgl, a.avg_mbgl,
-                        a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.stname,
+                        a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.state,
                         ST_AsGeoJSON(ST_MakeValid(a.geometry)) AS geojson,
                         ST_Y(ST_Centroid(a.geometry)) AS center_lat,
                         ST_X(ST_Centroid(a.geometry)) AS center_lng
-                    FROM public.major_aquifers a
+                    FROM public.aquifers a
                     WHERE ST_Intersects(
                         ST_MakeValid(a.geometry),
                         ST_GeomFromGeoJSON(:state_geojson)
@@ -2047,7 +2038,7 @@ def get_aquifers_by_state(state_name: str):
                             "aquifer": row[0], "aquifers": row[1], "zone_m": row[2],
                             "mbgl": row[3], "avg_mbgl": row[4], "m2_perday": row[5],
                             "m3_per_day": row[6], "yeild": row[7], "per_cm": row[8],
-                            "stname": row[9], "geometry": geom_json,
+                            "state": row[9], "geometry": geom_json,
                             "center": [row[11], row[12]] if row[11] and row[12] else None
                         })
                     except Exception as e:
@@ -2089,7 +2080,7 @@ def get_aquifers_by_district(state_name: str, district_name: str):
             aquifer_query = text("""
                 SELECT 
                     a.aquifer, a.aquifers, a.zone_m, a.mbgl, a.avg_mbgl,
-                    a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.stname,
+                    a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.state,
                     ST_AsGeoJSON(
                         ST_MakeValid(
                             ST_Intersection(
@@ -2110,12 +2101,12 @@ def get_aquifers_by_district(state_name: str, district_name: str):
                             ST_GeomFromGeoJSON(:district_geojson)
                         )
                     )) AS center_lng
-                FROM public.major_aquifers a
+                FROM public.aquifers a
                 WHERE ST_Intersects(
                     ST_MakeValid(a.geometry),
                     ST_GeomFromGeoJSON(:district_geojson)
                 )
-                AND LOWER(a.stname) LIKE LOWER(:state_pattern)
+                AND LOWER(a.state) LIKE LOWER(:state_pattern)
                 ORDER BY a.aquifer;
             """)
             
@@ -2138,7 +2129,7 @@ def get_aquifers_by_district(state_name: str, district_name: str):
                         "aquifer": row[0], "aquifers": row[1], "zone_m": row[2],
                         "mbgl": row[3], "avg_mbgl": row[4], "m2_perday": row[5],
                         "m3_per_day": row[6], "yeild": row[7], "per_cm": row[8],
-                        "stname": row[9], "geometry": geom_json,
+                        "state": row[9], "geometry": geom_json,
                         "center": [row[11], row[12]] if row[11] and row[12] else None
                     })
                 except Exception as e:
@@ -2151,11 +2142,11 @@ def get_aquifers_by_district(state_name: str, district_name: str):
                 fallback_query = text("""
                     SELECT 
                         a.aquifer, a.aquifers, a.zone_m, a.mbgl, a.avg_mbgl,
-                        a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.stname,
+                        a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.state,
                         ST_AsGeoJSON(ST_MakeValid(a.geometry)) AS geojson,
                         ST_Y(ST_Centroid(a.geometry)) AS center_lat,
                         ST_X(ST_Centroid(a.geometry)) AS center_lng
-                    FROM public.major_aquifers a
+                    FROM public.aquifers a
                     WHERE ST_Intersects(
                         ST_MakeValid(a.geometry),
                         ST_GeomFromGeoJSON(:district_geojson)
@@ -2171,7 +2162,7 @@ def get_aquifers_by_district(state_name: str, district_name: str):
                             "aquifer": row[0], "aquifers": row[1], "zone_m": row[2],
                             "mbgl": row[3], "avg_mbgl": row[4], "m2_perday": row[5],
                             "m3_per_day": row[6], "yeild": row[7], "per_cm": row[8],
-                            "stname": row[9], "geometry": geom_json,
+                            "state": row[9], "geometry": geom_json,
                             "center": [row[11], row[12]] if row[11] and row[12] else None
                         })
                     except Exception as e:
@@ -2300,7 +2291,7 @@ def get_groundwater_wells(
                 WHEN "LON" IS NOT NULL AND "LON" != 0 THEN "LON"
                 ELSE "LONGITUD_1"
             END as longitude,
-            "STATE_UT" as state,
+            "STATE" as state,
             "DISTRICT" as district,
             "Season",
             "SITE_NAME",
@@ -2858,7 +2849,7 @@ def get_storage_vs_gwr(
             SELECT 
                 ST_Area(ST_Transform(ST_MakeValid(geometry), 32643)) as area_m2,
                 yeild__
-            FROM major_aquifers
+            FROM aquifers
             {where_aquifer}
         """)
         
@@ -3150,7 +3141,7 @@ def get_grace(
                     check_query = text(f"""
                         SELECT COUNT(*) FROM (
                             SELECT (ST_PixelAsCentroids(rast, {band})).val as val
-                            FROM lwe_thickness_india WHERE rid = 1 LIMIT 10
+                            FROM public.grace_lwe WHERE rid = 1 LIMIT 10
                         ) sub WHERE val IS NOT NULL;
                     """)
                     has_data = conn.execute(check_query).fetchone()[0] > 0
@@ -3182,7 +3173,7 @@ def get_grace(
                         ST_X(ST_SetSRID((ST_PixelAsCentroids(rast, {band_num})).geom, 4326)) as longitude,
                         ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, {band_num})).geom, 4326)) as latitude,
                         (ST_PixelAsCentroids(rast, {band_num})).val as lwe_cm
-                    FROM lwe_thickness_india
+                    FROM public.grace_lwe
                     WHERE rid = 1
                 """)
                 result = conn.execute(query)
@@ -3293,7 +3284,7 @@ def get_rainfall(
     max_points: int = Query(10000, ge=100, le=50000)
 ):
     
-    table_name = f"rf25_ind{year}_rfp25"
+    table_name = f"rainfall_{year}"
     check_query = text("""
         SELECT EXISTS (
             SELECT FROM information_schema.tables 
@@ -3514,7 +3505,7 @@ def get_wells_for_analysis(boundary_geojson: str = None):
             "GWL",
             COALESCE(NULLIF("LAT", 0), "LATITUDE_1") as latitude,
             COALESCE(NULLIF("LON", 0), "LONGITUD_1") as longitude,
-            "STATE_UT" as state,
+            "STATE" as state,
             "DISTRICT" as district
         FROM groundwater_level
         {where_clause}
@@ -3559,7 +3550,7 @@ def get_aquifer_properties(boundary_geojson: str = None):
             yeild__,
             ST_Area(ST_Transform(ST_MakeValid(geometry), 32643)) as area_m2,
             ST_AsGeoJSON(ST_Centroid(geometry)) as centroid
-        FROM major_aquifers
+        FROM aquifers
         {where_clause}
     """)
     
@@ -3612,7 +3603,7 @@ def get_aquifer_polygons(boundary_geojson: str = None):
             yeild__,
             ST_Area(ST_Transform({geometry_select}, 32643)) as area_m2,
             ST_AsGeoJSON({geometry_select}) as geometry
-        FROM major_aquifers
+        FROM aquifers
         {where_clause}
     """)
     
@@ -3782,7 +3773,7 @@ def aquifer_suitability_index(
                     f"4. Normalized to 0-5 scale using quantile stretching (range: {round(float(q_low), 3)}-{round(float(q_high), 3)})"
                 ],
                 "formula": "ASI = ((Sy - q_low) / (q_high - q_low)) × 5",
-                "data_source": "major_aquifers table"
+                "data_source": "aquifers table"
             },
             
             "interpretation": {
@@ -4040,7 +4031,7 @@ def aquifer_stress_score(
                     ST_X(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as longitude,
                     ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as latitude,
                     (ST_PixelAsCentroids(rast, {band})).val as tws
-                FROM lwe_thickness_india WHERE rid = 1
+                FROM public.grace_lwe WHERE rid = 1
             """)
             
             with engine.connect() as conn:
@@ -4067,7 +4058,7 @@ def aquifer_stress_score(
         
         # Get rainfall data
         try:
-            table_name = f"rf25_ind{year}_rfp25"
+            table_name = f"rainfall_{year}"
             first_day, last_day = get_month_day_range(year, month)
             
             rainfall_values = []
@@ -4237,7 +4228,7 @@ def grace_divergence_analysis(
                 ST_X(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as longitude,
                 ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as latitude,
                 (ST_PixelAsCentroids(rast, {band})).val as tws
-            FROM lwe_thickness_india WHERE rid = 1
+            FROM public.grace_lwe WHERE rid = 1
         """)
         
         with engine.connect() as conn:
@@ -4509,7 +4500,7 @@ def gwl_forecast_with_grace(
                         ST_X(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as lon,
                         ST_Y(ST_SetSRID((ST_PixelAsCentroids(rast, {band})).geom, 4326)) as lat,
                         (ST_PixelAsCentroids(rast, {band})).val as tws
-                    FROM lwe_thickness_india
+                    FROM public.grace_lwe
                     WHERE rid = 1
                 """)
                 
@@ -4813,7 +4804,7 @@ def recharge_planning(
             use_year = max(RAINFALL_TABLES.keys()) if RAINFALL_TABLES else 2023
         
         try:
-            table_name = f"rf25_ind{use_year}_rfp25"
+            table_name = f"rainfall_{use_year}"
             monsoon_months = [6, 7, 8, 9]  # June-September
             
             total_rainfall_mm = 0
