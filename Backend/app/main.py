@@ -36,41 +36,32 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import pickle
 import base64
+from dotenv import load_dotenv
 from typing import Optional, List, Any # Updated imports
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 import httpx
+from testingragsql import query_agent
+load_dotenv()
+DATABASE_URL = os.environ.get("DB_URI")
+if not DATABASE_URL:
+    print("ERROR: DB_URI not set in .env file")
+    exit(1)
 # Optional dependencies
 try:
     import ruptures as rpt
     RUPTURES_AVAILABLE = True
 except ImportError:
     RUPTURES_AVAILABLE = False
-    print("⚠️  ruptures not available - changepoint detection disabled")
+    print("WARNING: ruptures not available - changepoint detection disabled")
 
 try:
     import pymannkendall as mk
     MK_AVAILABLE = True
 except ImportError:
     MK_AVAILABLE = False
-    print("⚠️  pymannkendall not available - Mann-Kzendall test disabled")
+    print("WARNING: pymannkendall not available - Mann-Kzendall test disabled")
 
-# ============= CHATBOT IMPORTS =============
-try:
-    from langchain_chroma import Chroma
-    from langchain_ollama import ChatOllama
-    from langchain_huggingface import HuggingFaceEmbeddings
-    from langchain_core.prompts import PromptTemplate
-    from langchain_core.runnables import RunnableLambda, RunnableMap
-    import chromadb
-    CHATBOT_AVAILABLE = True
-except ImportError as e:
-    print(f"⚠️  Chatbot dependencies not available: {e}")
-    CHATBOT_AVAILABLE = False
-
-from dotenv import load_dotenv
-
-load_dotenv()
 # ============= NEW: SIMPLE CACHE CLASS =============
 class SimpleCache:
     def __init__(self, ttl_seconds=3600):
@@ -122,7 +113,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DATABASE_URL = os.environ.get("DB_URI")
+# Load environment variables from Backend/.env
 engine = create_engine(
     DATABASE_URL,
     poolclass=QueuePool,
@@ -146,174 +137,6 @@ async def start_cache_cleanup():
             print("🧹 Cache cleanup complete")
     
     asyncio.create_task(cleanup_task())
-
-# ============= CHATBOT SETUP =============
-CHATBOT_ENABLED = False
-chatbot_chain = None
-contextualize_q_chain = None
-qa_chain = None
-
-class Message(BaseModel):
-    role: str
-    content: str
-
-class ChatRequest(BaseModel):
-    question: str
-    map_context: Optional[dict] = None
-    chat_history: List[Message] = [] 
-
-class ChatResponse(BaseModel):
-    answer: str
-    sources_used: int
-
-if CHATBOT_AVAILABLE:
-    print("🤖 Initializing Context-Aware Chatbot...")
-    try:
-        # 1. Setup Embeddings
-        embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        chroma_client = chromadb.PersistentClient(path="/dashboard/chroma_db")
-        
-        # 2. Load Collections
-        # Analysis Collection (If used for other docs)
-        try:
-            vector_store_analysis = Chroma(
-                client=chroma_client, 
-                collection_name="analysis_collection", 
-                embedding_function=embedding_function
-            )
-        except: vector_store_analysis = None
-
-        # Definitions Collection (Static Knowledge)
-        try:
-            vector_store_definitions = Chroma(
-                client=chroma_client, 
-                collection_name="definitions_collection", 
-                embedding_function=embedding_function
-            )
-        except: vector_store_definitions = None
-
-        # ✅ NEW: Reports Collection (Your 2024 Report Data)
-        vector_store_reports = Chroma(
-            client=chroma_client, 
-            collection_name="reports_collection", 
-            embedding_function=embedding_function
-        )
-        
-        llm = ChatOllama(
-            model="llama3.1:8b",
-            temperature=0.2,
-            keep_alive="5m"
-        )
-
-        # 3. Step A: Contextualize Question Chain (Rewriter)
-        contextualize_q_system_prompt = """Given a chat history and a user question, reformulate the question to be standalone if needed.
-
-Rules:
-1. If question is already clear and standalone → Return it EXACTLY as given
-2. If question has pronouns ("it", "this", "that") → Replace with specific topic from history
-3. If question references previous context → Add that context
-4. Never add extra details not in the original question
-5. Keep the same question style and brevity
-
-Output ONLY the reformulated question, nothing else.
-
-Examples:
-Q: "how does it work?" [History: discussing GRACE data]
-A: How does GRACE data work?
-
-Q: "what about rainfall trends?" [No pronouns]
-A: what about rainfall trends?
-
-Q: "compare this to last year" [Current: Kerala 2023]
-A: compare Kerala 2023 to 2022
-
-Now reformulate:"""
-
-        contextualize_q_prompt = PromptTemplate(
-            template=contextualize_q_system_prompt + "\n\nChat History:\n{chat_history}\n\nUser Question: {question}\n\nReformulated Question:",
-            input_variables=["chat_history", "question"]
-        )
-
-        contextualize_q_chain = contextualize_q_prompt | llm | StrOutputParser()
-
-        # 4. Retrieval Function
-        def retrieve_documents(query: str, state: str = None, district: str = None):
-            """
-            Retrieves documents by 'injecting' the location into the search query.
-            This forces the vector DB to prioritize chunks that mention this specific region.
-            """
-            
-            # 1. Construct the "Expanded Query"
-            search_query = query
-            
-            # If we know the location, append it to the search string
-            # This acts like a soft filter because chunks mentioning 'Kerala' will have higher cosine similarity
-            location_context = ""
-            if district and state:
-                location_context = f" in {district}, {state}"
-            elif state:
-                location_context = f" in {state}"
-                
-            full_search_query = f"{query}{location_context}"
-            
-            print(f"🔍 Searching RAG for: '{full_search_query}'") 
-            
-            all_docs = []
-
-            # 2. Search Definitions (Keep original query for generic terms)
-            if vector_store_definitions:
-                # Definitions don't care about location, so use the original short query
-                all_docs.extend(vector_store_definitions.similarity_search(query, k=1))
-
-            # 3. Search Reports (Use the EXPANDED query)
-            try:
-                # We search for "aquifer properties in Kerala" instead of just "aquifer properties"
-                report_docs = vector_store_reports.similarity_search(full_search_query, k=3)
-                all_docs.extend(report_docs)
-            except Exception as e:
-                print(f"⚠️ Vector search failed: {e}")
-
-            return "\n\n".join([d.page_content for d in all_docs])
-
-        # 5. Step B: QA Chain (The Answerer)
-# 5. Step B: QA Chain (The Answerer)
-        qa_system_prompt = """You are an expert Hydrogeologist for the GeoHydro platform.
-
-        **AVAILABLE DATA:**
-        - Dashboard Statistics: {map_context} (exact numbers from user's current view)
-        - Knowledge Base: {context} (reference documents for scientific context)
-        - Chat History: {chat_history} (previous conversation)
-
-        **RESPONSE STYLE:**
-        - Be thorough and detailed when explaining concepts
-        - Use exact statistics from dashboard data
-        - Combine numbers with hydrogeological interpretation
-        - Explain what values mean in practical terms
-        - Provide context using knowledge base when relevant
-
-        **HONESTY RULES:**
-        - If you don't know something specific, say "I don't know [X]"
-        - Never mention "context", "knowledge base", or "provided information" in your response
-        - Never explain your limitations - just admit gaps simply
-
-        **CURRENT QUESTION:** {question}
-
-        Provide a detailed, expert-level answer:"""
-                
-
-        qa_prompt = PromptTemplate(
-            template=qa_system_prompt + "\nUSER QUESTION: {question}",
-            input_variables=["map_context", "context", "question", "chat_history"]
-        )
-
-        qa_chain = qa_prompt | llm | StrOutputParser()
-
-        CHATBOT_ENABLED = True
-        print("✅ Context-Aware Chatbot initialized successfully!")
-
-    except Exception as e:
-        CHATBOT_ENABLED = False
-        print(f"⚠️ Chatbot initialization failed: {e}")
 
 
 # =============================================================================
@@ -1197,55 +1020,7 @@ def query_rainfall_monthly(boundary_geojson: str = None):
     
     print(f"  ✓ Rainfall (fresh): {len(df)} months retrieved")
     return df
-def build_location_context(state: str, district: str) -> str:
-    """
-    Fetches real-time statistics from the SQL DB and formats them 
-    into a text summary for the LLM.
-    """
-    print(f"🤖 Hydrating context for: {district}, {state}")
-    parts = [f"**CURRENT LOCATION:** District: {district}, State: {state}"]
-    
-    try:
-        # 1. Get Groundwater Summary (Using your existing logic)
-        # We assume get_boundary_geojson is available
-        boundary = get_boundary_geojson(state, district)
-        
-        # We call the logic that powers get_wells_summary manually
-        # (Re-using the logic from your get_wells_summary endpoint)
-        summary_data = get_wells_summary(state=state, district=district)
-        
-        if "statistics" in summary_data and summary_data["statistics"]:
-            stats = summary_data["statistics"]
-            trend = summary_data.get("trend", {})
-            
-            parts.append("\n**GROUNDWATER LEVEL (GWL) STATUS:**")
-            parts.append(f"- Average GWL: {stats.get('mean_gwl', 'N/A')} meters below ground level (mbgl)")
-            parts.append(f"- Fluctuation: {stats.get('std_gwl', 'N/A')} meters (Standard Deviation)")
-            parts.append(f"- Long-term Trend: {trend.get('trend_direction', 'Unknown')} ({trend.get('slope_m_per_year', 0)} m/year)")
-            parts.append(f"- Trend Significance: {trend.get('significance', 'Unknown')}")
 
-        # 2. Get Aquifer Info (Using your existing get_aquifer_properties)
-        # Note: We need to handle the fact that get_aquifer_properties returns a DataFrame
-        aquifer_df = get_aquifer_properties(boundary)
-        
-        if not aquifer_df.empty:
-            parts.append("\n**AQUIFER GEOLOGY:**")
-            if 'majoraquif' in aquifer_df.columns:
-                dom_aquifer = aquifer_df['majoraquif'].mode()[0]
-                parts.append(f"- Dominant Aquifer: {dom_aquifer}")
-            if 'yield' in aquifer_df.columns:
-                 # Clean up yield string if possible
-                avg_yield = aquifer_df['yield'].iloc[0]
-                parts.append(f"- Yield Potential: {avg_yield}")
-            if 'area_m2' in aquifer_df.columns:
-                 total_area = aquifer_df['area_m2'].sum() / 1_000_000 # Convert to sq km
-                 parts.append(f"- Aquifer Area: {round(total_area, 2)} sq km")
-
-    except Exception as e:
-        print(f"⚠️ Context build error: {e}")
-        parts.append("\n(Note: Some real-time statistical data could not be retrieved from the database.)")
-
-    return "\n".join(parts)
 
 AVAILABLE_GWR_YEARS = [2017]  # ← Add new years here when you get them
 def get_available_gwr_years():
@@ -1283,9 +1058,6 @@ def root():
         "endpoints": {
             "diagnostics": [
                 "GET /api/debug/raster-info - Diagnostic endpoint for troubleshooting"
-            ],
-            "chatbot": [
-                "POST /api/chat - Ask questions to AI assistant (if enabled)"
             ],
             "geography": [
                 "GET /api/states - List all states",
@@ -1494,106 +1266,6 @@ async def debug_raster_info(
             "traceback": traceback.format_exc()
         }
 
-# =============================================================================
-# CHATBOT ENDPOINT
-# ============================================================================
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    """
-    Context-aware chatbot that uses frontend-provided map context
-    No backend tool calls needed - frontend sends enriched statistics
-    """
-    if not CHATBOT_ENABLED:
-        raise HTTPException(status_code=503, detail="Chatbot unavailable")
-    
-    try:
-        # ═══════════════════════════════════════════════════════════════
-        # EXTRACT LOCATION FROM CONTEXT
-        # ═══════════════════════════════════════════════════════════════
-        state = None
-        district = None
-        
-        if request.map_context and isinstance(request.map_context, dict):
-            if "state" in request.map_context:
-                state = request.map_context.get("state")
-                district = request.map_context.get("district")
-            elif "region" in request.map_context:
-                state = request.map_context["region"].get("state")
-                district = request.map_context["region"].get("district")
-        
-        print(f"🗺️  Location: {district or 'All'}, {state or 'India'}")
-        
-        # ═══════════════════════════════════════════════════════════════
-        # FORMAT MAP CONTEXT (Frontend already provides rich stats)
-        # ═══════════════════════════════════════════════════════════════
-        frontend_context_str = json.dumps(request.map_context, indent=2) if request.map_context else "No map context provided"
-        
-        full_map_context = f"""
-**LIVE DASHBOARD CONTEXT:**
-The user is viewing the GeoHydro dashboard for: {district or 'All Districts'}, {state or 'All India'}
-
-**Current View Statistics:**
-{frontend_context_str}
-
-**IMPORTANT:** 
-- All statistics above are LIVE from the current map view
-- Use these exact numbers when answering - they reflect what the user sees
-- If a module shows "No data", tell the user that specific analysis isn't available for this region
-""".strip()
-        
-        # ═══════════════════════════════════════════════════════════════
-        # FORMAT CHAT HISTORY
-        # ═══════════════════════════════════════════════════════════════
-        history_text = "\n".join([
-            f"{msg.role}: {msg.content}" 
-            for msg in request.chat_history
-        ])
-        
-        # ═══════════════════════════════════════════════════════════════
-        # QUERY REWRITING (Contextualize standalone question)
-        # ═══════════════════════════════════════════════════════════════
-        if request.chat_history:
-            standalone_question = contextualize_q_chain.invoke({
-                "chat_history": history_text,
-                "question": request.question
-            })
-            print(f"🔄 Rewrote: '{request.question}' → '{standalone_question}'")
-        else:
-            standalone_question = request.question
-        
-        # ═══════════════════════════════════════════════════════════════
-        # RETRIEVAL (Vector DB for static knowledge)
-        # ═══════════════════════════════════════════════════════════════
-        search_query = f"{standalone_question} in {district}, {state}" if (district and state) else standalone_question
-        
-        retrieved_docs = retrieve_documents(search_query, state, district)
-        sources_count = len(retrieved_docs.split("Source:")) - 1
-        
-        print(f"📚 Retrieved {sources_count} knowledge sources")
-        
-        # ═══════════════════════════════════════════════════════════════
-        # GENERATE ANSWER
-        # ═══════════════════════════════════════════════════════════════
-        answer = qa_chain.invoke({
-            "map_context": full_map_context,  # ✅ Frontend-provided stats
-            "context": retrieved_docs,         # ✅ Vector DB knowledge
-            "question": standalone_question,
-            "chat_history": history_text
-        })
-        
-        print(f"✅ Answer generated ({len(answer)} chars)")
-        
-        # ═══════════════════════════════════════════════════════════════
-        # RETURN RESPONSE
-        # ═══════════════════════════════════════════════════════════════
-        return ChatResponse(
-            answer=answer.strip(),
-            sources_used=sources_count
-        )
-    
-    except Exception as e:
-        print(f"❌ Chat error: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=str(e))
 # =============================================================================
 # GEOGRAPHY ENDPOINTS
 # =============================================================================
@@ -1972,7 +1644,8 @@ def get_aquifers_by_state(state_name: str):
                     a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.state,
                     ST_AsGeoJSON(ST_MakeValid(a.geometry)) AS geojson,
                     ST_Y(ST_Centroid(a.geometry)) AS center_lat,
-                    ST_X(ST_Centroid(a.geometry)) AS center_lng
+                    ST_X(ST_Centroid(a.geometry)) AS center_lng,
+                    ST_Area(ST_Transform(ST_MakeValid(a.geometry), 3857)) AS area_sqm
                 FROM public.aquifers a
                 WHERE ST_Intersects(
                     ST_MakeValid(a.geometry),
@@ -2006,7 +1679,8 @@ def get_aquifers_by_state(state_name: str):
                         "mbgl": row[3], "avg_mbgl": row[4], "m2_perday": row[5],
                         "m3_per_day": row[6], "yeild": row[7], "per_cm": row[8],
                         "state": row[9], "geometry": geom_json,
-                        "center": [row[11], row[12]] if row[11] and row[12] else None
+                        "center": [row[11], row[12]] if row[11] and row[12] else None,
+                        "area_sqm": float(row[13]) if row[13] else 0
                     })
                 except Exception as e:
                     print(f"Error parsing aquifer geometry: {e}")
@@ -2021,7 +1695,8 @@ def get_aquifers_by_state(state_name: str):
                         a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.state,
                         ST_AsGeoJSON(ST_MakeValid(a.geometry)) AS geojson,
                         ST_Y(ST_Centroid(a.geometry)) AS center_lat,
-                        ST_X(ST_Centroid(a.geometry)) AS center_lng
+                        ST_X(ST_Centroid(a.geometry)) AS center_lng,
+                        ST_Area(ST_Transform(ST_MakeValid(a.geometry), 3857)) AS area_sqm
                     FROM public.aquifers a
                     WHERE ST_Intersects(
                         ST_MakeValid(a.geometry),
@@ -2039,7 +1714,8 @@ def get_aquifers_by_state(state_name: str):
                             "mbgl": row[3], "avg_mbgl": row[4], "m2_perday": row[5],
                             "m3_per_day": row[6], "yeild": row[7], "per_cm": row[8],
                             "state": row[9], "geometry": geom_json,
-                            "center": [row[11], row[12]] if row[11] and row[12] else None
+                            "center": [row[11], row[12]] if row[11] and row[12] else None,
+                            "area_sqm": float(row[13]) if row[13] else 0
                         })
                     except Exception as e:
                         print(f"Error parsing fallback aquifer geometry: {e}")
@@ -2100,7 +1776,16 @@ def get_aquifers_by_district(state_name: str, district_name: str):
                             ST_MakeValid(a.geometry),
                             ST_GeomFromGeoJSON(:district_geojson)
                         )
-                    )) AS center_lng
+                    )) AS center_lng,
+                    ST_Area(
+                        ST_Transform(
+                            ST_Intersection(
+                                ST_MakeValid(a.geometry),
+                                ST_GeomFromGeoJSON(:district_geojson)
+                            ),
+                            3857
+                        )
+                    ) AS area_sqm
                 FROM public.aquifers a
                 WHERE ST_Intersects(
                     ST_MakeValid(a.geometry),
@@ -2130,7 +1815,8 @@ def get_aquifers_by_district(state_name: str, district_name: str):
                         "mbgl": row[3], "avg_mbgl": row[4], "m2_perday": row[5],
                         "m3_per_day": row[6], "yeild": row[7], "per_cm": row[8],
                         "state": row[9], "geometry": geom_json,
-                        "center": [row[11], row[12]] if row[11] and row[12] else None
+                        "center": [row[11], row[12]] if row[11] and row[12] else None,
+                        "area_sqm": float(row[13]) if row[13] else 0
                     })
                 except Exception as e:
                     print(f"Error parsing aquifer geometry: {e}")
@@ -2145,7 +1831,8 @@ def get_aquifers_by_district(state_name: str, district_name: str):
                         a.m2_perday, a.m3_per_day, a.yeild__, a.per_cm, a.state,
                         ST_AsGeoJSON(ST_MakeValid(a.geometry)) AS geojson,
                         ST_Y(ST_Centroid(a.geometry)) AS center_lat,
-                        ST_X(ST_Centroid(a.geometry)) AS center_lng
+                        ST_X(ST_Centroid(a.geometry)) AS center_lng,
+                        ST_Area(ST_Transform(ST_MakeValid(a.geometry), 3857)) AS area_sqm
                     FROM public.aquifers a
                     WHERE ST_Intersects(
                         ST_MakeValid(a.geometry),
@@ -2163,7 +1850,8 @@ def get_aquifers_by_district(state_name: str, district_name: str):
                             "mbgl": row[3], "avg_mbgl": row[4], "m2_perday": row[5],
                             "m3_per_day": row[6], "yeild": row[7], "per_cm": row[8],
                             "state": row[9], "geometry": geom_json,
-                            "center": [row[11], row[12]] if row[11] and row[12] else None
+                            "center": [row[11], row[12]] if row[11] and row[12] else None,
+                            "area_sqm": float(row[13]) if row[13] else 0
                         })
                     except Exception as e:
                         print(f"Error parsing fallback aquifer geometry: {e}")
@@ -3751,6 +3439,25 @@ def aquifer_suitability_index(
             "total_area_km2": round(float(aquifers_df['area_m2'].sum()) / 1_000_000, 2)
         }
         
+        # Calculate additional context metrics
+        high_suit_pct = round((aquifers_df['asi_score'] >= 3.5).sum() / len(aquifers_df) * 100, 1)
+        low_suit_pct = round((aquifers_df['asi_score'] < 2.5).sum() / len(aquifers_df) * 100, 1)
+        
+        # Determine regional assessment
+        mean_asi = statistics["mean_asi"]
+        if mean_asi > 3.5:
+            regional_rating = "Excellent"
+            rating_context = "exceptionally favorable geological conditions with high groundwater storage capacity"
+        elif mean_asi > 2.5:
+            regional_rating = "Good"
+            rating_context = "favorable conditions with moderate to good storage potential in most areas"
+        elif mean_asi > 1.5:
+            regional_rating = "Moderate"
+            rating_context = "mixed geological conditions requiring targeted groundwater development strategies"
+        else:
+            regional_rating = "Poor"
+            rating_context = "challenging hard-rock terrain with limited natural storage capacity"
+        
         return {
             "module": "ASI",
             "description": "Aquifer Suitability Index (0-5 scale)",
@@ -3759,7 +3466,7 @@ def aquifer_suitability_index(
             "count": len(aquifers_df),
             "geojson": geojson_data,
             
-            # ✅ ADDED
+            # ✅ ENHANCED METHODOLOGY
             "methodology": {
                 "approach": "Lithology-based specific yield normalization",
                 "quantile_stretch": {
@@ -3773,9 +3480,11 @@ def aquifer_suitability_index(
                     f"4. Normalized to 0-5 scale using quantile stretching (range: {round(float(q_low), 3)}-{round(float(q_high), 3)})"
                 ],
                 "formula": "ASI = ((Sy - q_low) / (q_high - q_low)) × 5",
-                "data_source": "aquifers table"
+                "data_source": "aquifers table",
+                "scientific_basis": "Higher specific yield indicates better porosity and storage capacity, making aquifers more suitable for sustainable groundwater extraction."
             },
             
+            # ✅ ENHANCED INTERPRETATION WITH NARRATIVES
             "interpretation": {
                 "score_meaning": {
                     "0-1.5": "Poor suitability (hard rock, low storage)",
@@ -3783,14 +3492,39 @@ def aquifer_suitability_index(
                     "2.5-3.5": "Moderate suitability (mixed aquifers)",
                     "3.5-5.0": "High suitability (alluvium, unconsolidated sediments)"
                 },
-                "regional_rating": "Excellent" if statistics["mean_asi"] > 3.5 else ("Good" if statistics["mean_asi"] > 2.5 else "Moderate"),
-                "high_suitability_percentage": round((aquifers_df['asi_score'] >= 3.5).sum() / len(aquifers_df) * 100, 1)
+                "regional_rating": regional_rating,
+                "regional_narrative": f"This region exhibits {regional_rating.lower()} aquifer suitability with {rating_context}.",
+                "high_suitability_percentage": high_suit_pct,
+                "low_suitability_percentage": low_suit_pct,
+                
+                # Spatial distribution context
+                "spatial_distribution": {
+                    "high_quality_areas": f"{high_suit_pct}% of the region",
+                    "challenging_areas": f"{low_suit_pct}% of the region",
+                    "assessment": "highly heterogeneous" if abs(high_suit_pct - low_suit_pct) < 20 else ("predominantly favorable" if high_suit_pct > 50 else "predominantly challenging")
+                },
+                
+                # Comparative context
+                "comparative_context": {
+                    "mean_vs_median": "balanced distribution" if abs(statistics["mean_asi"] - statistics["median_asi"]) < 0.3 else "skewed distribution",
+                    "variability": "high variability" if statistics["std_asi"] > 1.0 else "moderate variability" if statistics["std_asi"] > 0.5 else "low variability",
+                    "range_span": f"Score range spans {round(statistics['max_asi'] - statistics['min_asi'], 2)} points"
+                }
             },
             
+            # ✅ ENHANCED KEY INSIGHTS WITH ACTIONABLE CONTEXT
             "key_insights": [
-                f"Mean ASI: {statistics['mean_asi']} ({'good' if statistics['mean_asi'] > 2.5 else 'moderate'} storage potential)",
-                f"{round((aquifers_df['asi_score'] >= 3.5).sum() / len(aquifers_df) * 100, 1)}% of area has high suitability (ASI > 3.5)",
-                f"Dominant aquifer: {statistics.get('dominant_aquifer', 'N/A')}"
+                # Primary assessment
+                f"🎯 Regional Suitability: {regional_rating} (Mean ASI: {statistics['mean_asi']}/5.0) - {rating_context}",
+                
+                 # Spatial breakdown
+                f"📊 Spatial Analysis: {high_suit_pct}% high-suitability areas, {low_suit_pct}% challenging terrain",
+                
+                # Dominant geology
+                f"🪨 Geology: Dominated by {statistics.get('dominant_aquifer', 'N/A')} with average specific yield of {round(statistics['avg_specific_yield'] * 100, 1)}%",
+                
+                # Scale context
+                f"📏 Coverage: {statistics['total_area_km2']} km² analyzed across {len(aquifers_df)} aquifer units"
             ]
         }
     
@@ -3929,6 +3663,40 @@ def well_network_density(
             print(traceback.format_exc())
             map2_results = []
         
+        # Calculate enhanced metrics
+        avg_strength = round(float(sites_df['strength'].mean()), 3)
+        avg_density = round(float(sites_df['local_density_per_km2'].mean()), 4)
+        strong_signal_count = int((sites_df['strength'] > 0.7).sum())
+        strong_signal_pct = round((strong_signal_count / len(sites_df)) * 100, 1)
+        
+        # Determine quality assessment
+        if avg_strength > 1.5:
+            signal_quality = "Excellent"
+            quality_context = "very high confidence in trend detection with minimal noise"
+        elif avg_strength > 0.7:
+            signal_quality = "Good"
+            quality_context = "strong signal quality enabling reliable trend analysis"
+        elif avg_strength > 0.3:
+            signal_quality = "Moderate"
+            quality_context = "detectable trends but with some noise requiring careful interpretation"
+        else:
+            signal_quality = "Poor"
+            quality_context = "weak signals dominated by noise, making trend detection challenging"
+        
+        # Density assessment
+        if avg_density > 0.05:
+            coverage_rating = "Excellent"
+            coverage_context = "dense monitoring network providing comprehensive spatial coverage"
+        elif avg_density > 0.03:
+            coverage_rating = "Good"
+            coverage_context = "adequate monitoring coverage for regional analysis"
+        elif avg_density > 0.01:
+            coverage_rating = "Moderate"
+            coverage_context = "sparse but functional monitoring network with coverage gaps"
+        else:
+            coverage_rating = "Poor"
+            coverage_context = "very sparse monitoring requiring network expansion"
+        
         return {
             "module": "NETWORK_DENSITY",
             "description": f"Well network analysis with {radius_km}km radius",
@@ -3936,13 +3704,13 @@ def well_network_density(
             "parameters": {"radius_km": radius_km},
             "statistics": {
                 "total_sites": len(map1_results),
-                "avg_strength": round(float(sites_df['strength'].mean()), 3),
-                "avg_local_density": round(float(sites_df['local_density_per_km2'].mean()), 4),
+                "avg_strength": avg_strength,
+                "avg_local_density": avg_density,
                 "median_observations": int(sites_df['n_observations'].median()),
                 "grid_cells": len(map2_results)
             },
             
-            # ✅ ADDED
+            # ✅ ENHANCED METHODOLOGY
             "methodology": {
                 "approach": "Haversine-based spatial signal strength + local density",
                 "steps": [
@@ -3953,9 +3721,11 @@ def well_network_density(
                     f"5. Generated gridded density map ({len(map2_results)} cells) clipped to region boundary"
                 ],
                 "signal_strength_formula": "strength = |trend_slope| / σ(GWL)",
-                "density_formula": f"density = neighbors / (π × {radius_km}²) × 1000 km²"
+                "density_formula": f"density = neighbors / (π × {radius_km}²) × 1000 km²",
+                "scientific_basis": "Higher signal strength indicates clearer trends with less noise, enabling more confident groundwater trend analysis and forecasting."
             },
             
+            # ✅ ENHANCED INTERPRETATION
             "interpretation": {
                 "strength_levels": {
                     "0-0.3": "Weak signal (noisy data)",
@@ -3963,14 +3733,31 @@ def well_network_density(
                     "0.7-1.5": "Strong signal (reliable trend)",
                     ">1.5": "Very strong signal (high confidence)"
                 },
-                "density_quality": "Good coverage" if sites_df['local_density_per_km2'].mean() > 0.03 else "Sparse coverage"
+                "signal_quality_rating": signal_quality,
+                "coverage_quality_rating": coverage_rating,
+                "regional_narrative": f"This monitoring network exhibits {signal_quality.lower()} signal quality with {quality_context} and {coverage_rating.lower()} spatial coverage with {coverage_context}.",
+                "strong_signal_percentage": strong_signal_pct,
+                
+                "spatial_distribution": {
+                    "high_quality_sites": f"{strong_signal_pct}% have strong signals (>0.7)",
+                    "network_density": f"{avg_density} sites/km²",
+                    "assessment": "well-distributed" if avg_density > 0.03 else "clustered/sparse"
+                },
+                
+                "comparative_context": {
+                    "data_richness": f"Median {int(sites_df['n_observations'].median())} observations per site",
+                    "signal_variation": "high variability" if sites_df['strength'].std() > 0.5 else "consistent signals",
+                    "network_maturity": "mature" if int(sites_df['n_observations'].median()) > 50 else "developing"
+                }
             },
             
+            # ✅ ENHANCED KEY INSIGHTS
             "key_insights": [
-                f"{len(map1_results)} monitoring sites analyzed",
-                f"Average signal strength: {round(float(sites_df['strength'].mean()), 2)} ({'high' if sites_df['strength'].mean() > 0.7 else 'moderate'} quality)",
-                f"{int((sites_df['strength'] > 0.7).sum())} sites have strong signal (>0.7)",
-                f"Average local density: {round(float(sites_df['local_density_per_km2'].mean()), 4)} sites/km²"
+                f"🎯 Network Quality: {signal_quality} signal quality ({avg_strength} avg strength) - {quality_context}",
+                f"📊 Coverage Assessment: {coverage_rating} ({avg_density} sites/km²) - {coverage_context}",
+                f"📈 High-Confidence Sites: {strong_signal_count} sites ({strong_signal_pct}%) have strong signals (>0.7)",
+                f"💡 Data Maturity: Median {int(sites_df['n_observations'].median())} observations per site - {'excellent temporal coverage' if int(sites_df['n_observations'].median()) > 50 else 'growing dataset'}",
+                f"📏 Analysis Scale: {len(map1_results)} monitoring sites across {len(map2_results)} grid cells"
             ],
             
             "map1_site_level": {
@@ -4131,6 +3918,29 @@ def aquifer_stress_score(
             "critical_sites": int(sum(1 for s in sass_values if s > 2.0))
         }
         
+        # Calculate enhanced metrics
+        mean_sass = statistics["mean_sass"]
+        stressed_pct = round((statistics["stressed_sites"] / len(results)) * 100, 1) if len(results) > 0 else 0
+        critical_pct = round((statistics["critical_sites"] / len(results)) * 100, 1) if len(results) > 0 else 0
+        
+        # Determine stress assessment
+        if mean_sass > 2.0:
+            stress_rating = "Critical"
+            stress_context = "severe aquifer stress requiring immediate emergency intervention"
+            urgency = "URGENT"
+        elif mean_sass > 1.0:
+            stress_rating = "Moderate"
+            stress_context = "moderate aquifer stress requiring proactive management"
+            urgency = "HIGH"
+        elif mean_sass > 0:
+            stress_rating = "Low"
+            stress_context = "low aquifer stress with adequate water availability"
+            urgency = "MODERATE"
+        else:
+            stress_rating = "Favorable"
+            stress_context = "better than average groundwater conditions"
+            urgency = "LOW"
+        
         # ✅ NOW RETURN THE RESPONSE
         return {
             "module": "SASS",
@@ -4166,9 +3976,14 @@ def aquifer_stress_score(
                         "data_source": f"Monthly rainfall for {year}-{month:02d}"
                     }
                 ],
-                "calculation": "Each component standardized to z-scores, then weighted sum"
+                
+                "calculation": "Each component standardized to z-scores, then weighted sum",
+                "scientific_basis":"SASS integrates ground observations (GWL), satellite data (GRACE), and climate inputs (rainfall) to provide comprehensive multi-source stress assessment."
+
             },
+
             
+            # ✅ ENHANCED INTERPRETATION
             "interpretation": {
                 "stress_levels": {
                     "<0": "No stress (better than average)",
@@ -4176,17 +3991,29 @@ def aquifer_stress_score(
                     "1-2": "Moderate stress (intervention recommended)",
                     ">2": "Critical stress (urgent action)"
                 },
-                "overall_status": "Critical" if statistics["mean_sass"] > 2 else ("Moderate" if statistics["mean_sass"] > 1 else "Low")
+                "overall_status": stress_rating,
+                "regional_narrative": f"This region exhibits {stress_rating.lower()} aquifer stress (mean SASS: {mean_sass}) indicating {stress_context} as of {year}-{month:02d}.",
+                "stress_distribution": {
+                    "critical_zones": f"{critical_pct}% ({statistics['critical_sites']} sites) with SASS > 2",
+                    "moderate_stress": f"{stressed_pct - critical_pct}% with SASS 1-2",
+                    "normal_conditions": f"{round(100 - stressed_pct, 1)}% with SASS < 1"
+                },
+                "spatial_assessment": "concentrated stress zones" if critical_pct > 20 else ("distributed stress" if stressed_pct > 30 else "stable"),
+                "comparative_context": {
+                    "severity_range": f"Max: {statistics['max_sass']}, Min: {statistics['min_sass']}",
+                    "dominant_driver": "GWL depletion (50% weight)"
+                }
             },
             
+            # ✅ ENHANCED KEY INSIGHTS
             "key_insights": [
-                f"Mean stress score: {statistics['mean_sass']} ({'critical' if statistics['mean_sass'] > 2 else ('moderate' if statistics['mean_sass'] > 1 else 'low')} stress)",
-                f"{statistics['stressed_sites']} sites moderately stressed (SASS > 1)",
-                f"{statistics['critical_sites']} sites critically stressed (SASS > 2)",
-                "GWL contributes 50% to stress score (primary driver)"
+                f"🎯 Stress Assessment: {stress_rating} (Mean SASS: {mean_sass}) - {stress_context}",
+                f"⚠️ Critical Zones: {statistics['critical_sites']} sites ({critical_pct}%) in critical stress (SASS > 2)",
+                f"📊 Distribution: {stressed_pct}% stressed ({statistics['stressed_sites']} sites), {round(100 - stressed_pct, 1)}% normal",
+                f"💧 Primary Driver: GWL depletion (50% weight) dominates stress signal",
+                f"📅 Temporal Snapshot: {year}-{month:02d} across {len(results)} monitoring sites"
             ]
         }
-        
     
     except HTTPException:
         raise
@@ -4301,8 +4128,30 @@ def grace_divergence_analysis(
             "positive_divergence_pixels": int((grace_df['divergence'] > 0).sum()),
             "negative_divergence_pixels": int((grace_df['divergence'] < 0).sum()),
             "max_divergence": round(safe_float(grace_df['divergence'].max()), 3),
-            "min_divergence": round(safe_float(grace_df['divergence'].min()), 3)
+            "min_divergence": round(safe_float(grace_df['divergence'].min()), 3),
+            "total_pixels": len(grace_df),
+            "mean_abs_divergence": round(safe_float(grace_df['divergence'].abs().mean()), 3)
         }
+        
+        # Calculate enhanced metrics
+        total_pixels = len(grace_df)
+        positive_div_pct = round((statistics['positive_divergence_pixels'] / total_pixels) * 100, 1) if total_pixels > 0 else 0
+        negative_div_pct = round((statistics['negative_divergence_pixels'] / total_pixels) * 100, 1) if total_pixels > 0 else 0
+        mean_abs_div = statistics['mean_abs_divergence']
+        
+        # Determine divergence quality
+        if mean_abs_div > 1.0:
+            divergence_rating = "High"
+            context = "significant mismatch between satellite and ground observations requiring investigation"
+            data_quality = "POOR"
+        elif mean_abs_div > 0.5:
+            divergence_rating = "Moderate"
+            context = "some divergence present, indicating localized discrepancies"
+            data_quality = "MODERATE"
+        else:
+            divergence_rating = "Low"
+            context = "good agreement between GRACE satellite and well measurements"
+            data_quality = "GOOD"
         return {
             "module": "GRACE_DIVERGENCE",
             "description": "Divergence between GRACE satellite and ground measurements",
@@ -4327,23 +4176,36 @@ def grace_divergence_analysis(
                     "4. Interpolated well z-scores to GRACE pixel locations",
                     "5. Calculated divergence = z_GRACE − z_GWL for each pixel"
                 ],
-                "formula": "divergence = z_GRACE − z_well_interpolated"
+                "formula": "divergence = z_GRACE − z_well_interpolated",
+                "scientific_basis": "Divergence analysis identifies spatial mismatches between satellite and ground observations, revealing data quality issues or hydrogeological anomalies."
             },
             
+            # ✅ ENHANCED INTERPRETATION
             "interpretation": {
                 "divergence_meaning": {
                     "positive": "GRACE shows more water than wells indicate (possible measurement mismatch)",
                     "negative": "Wells show more water than GRACE indicates (local vs regional difference)",
                     "near_zero": "Good agreement between satellite and ground"
                 },
-                "overall_agreement": "Good" if abs(statistics["mean_divergence"]) < 0.5 else "Poor"
+                "overall_agreement": data_quality,
+                "regional_narrative": f"This region exhibits {divergence_rating.lower()} divergence ({mean_abs_div} mean absolute) with {context}.",
+                "spatial_distribution": {
+                    "positive_divergence_areas": f"{positive_div_pct}% of region (GRACE > GWL)",
+                    "negative_divergence_areas": f"{negative_div_pct}% of region (GRACE < GWL)",
+                    "assessment": "localized anomalies" if positive_div_pct < 30 else "widespread divergence"
+                },
+                "comparative_context": {
+                    "data_agreement": "strong" if mean_abs_div < 0.5 else ("moderate" if mean_abs_div < 1.0 else "weak"),
+                    "anomaly_distribution": f"{positive_div_pct}% positive vs {negative_div_pct}% negative"
+                }
             },
             
+            # ✅ ENHANCED KEY INSIGHTS
             "key_insights": [
-                f"Mean divergence: {statistics['mean_divergence']} ({'good agreement' if abs(statistics['mean_divergence']) < 0.5 else 'poor agreement'})",
-                f"{statistics['positive_divergence_pixels']} pixels: GRACE > Wells",
-                f"{statistics['negative_divergence_pixels']} pixels: Wells > GRACE",
-                "Large divergence may indicate scale mismatch or local pumping effects"
+                f"🎯 Divergence Assessment: {divergence_rating} ({mean_abs_div} mean absolute) - {context}",
+                f"📊 Spatial Pattern: {positive_div_pct}% positive divergence, {negative_div_pct}% negative divergence",
+                f"🛰️ Data Quality: {data_quality} agreement between GRACE and ground wells",
+                f"📏 Analysis Coverage: {total_pixels} pixels analyzed across region"
             ]
         }
     
@@ -4678,8 +4540,34 @@ def gwl_forecast_with_grace(
             "recovering_cells": int((results_df['pred_delta_m'] < 0).sum()),
             "mean_r_squared": round(float(results_df['r_squared'].mean()), 3),
             "mean_grace_contribution": round(float(results_df['grace_component'].mean()), 3) if grace_available else 0.0,
-            "success_rate": round(successful / len(grid_lons) * 100, 1)
-        }        
+            "success_rate": round(successful / len(grid_lons) * 100, 1),
+            "total_cells": len(results)
+        }
+        
+        # Calculate enhanced metrics
+        total_cells = len(results)
+        declining_cells = statistics['declining_cells']
+        recovering_cells = statistics['recovering_cells']
+        mean_r2 = statistics['mean_r_squared']
+        mean_grace_contrib = statistics['mean_grace_contribution']
+        
+        declining_pct = round((declining_cells / total_cells) * 100, 1) if total_cells > 0 else 0
+        recovering_pct = round((recovering_cells / total_cells) * 100, 1) if total_cells > 0 else 0
+        high_confidence = mean_r2 > 0.7
+        
+        # Determine forecast quality
+        if mean_r2 > 0.7:
+            forecast_rating = "Excellent"
+            confidence_context = "high confidence predictions suitable for long-term planning"
+        elif mean_r2 > 0.5:
+            forecast_rating = "Good"
+            confidence_context = "reliable predictions with moderate confidence"
+        elif mean_r2 > 0.3:
+            forecast_rating = "Moderate"
+            confidence_context = "fair predictions requiring validation"
+        else:
+            forecast_rating = "Poor"
+            confidence_context = "low confidence predictions, use with caution"        
         return {
             "module": "FORECAST_GWL_GRACE",
             "description": f"GWL forecast ({forecast_months}-month) using trend + GRACE",
@@ -4716,23 +4604,42 @@ def gwl_forecast_with_grace(
                     f"6. Fit OLS: y = a + b×t + c×GRACE, forecast {forecast_months} months ahead",
                     "7. Added back GWL seasonality to forecast"
                 ],
-                "seasonality_handling": "Monthly climatology removed before trend fitting, added back for forecast"
+                "seasonality_handling": "Monthly climatology removed before trend fitting, added back for forecast",
+                "scientific_basis": "OLS regression captures linear trend and climate signal (GRACE) to project future groundwater levels, accounting for seasonal variations."
             },
             
+            # ✅ ENHANCED INTERPRETATION
             "interpretation": {
                 "change_meaning": {
                     "positive": "Declining (water levels getting deeper)",
                     "negative": "Recovering (water levels getting shallower)"
                 },
-                "confidence": f"{'High' if statistics['mean_r_squared'] > 0.7 else ('Medium' if statistics['mean_r_squared'] > 0.5 else 'Low')} (R² = {statistics['mean_r_squared']})",
-                "grace_impact": f"GRACE contributes average {statistics['mean_grace_contribution']}m to forecast" if grace_available else "No GRACE data used"
+                "confidence": forecast_rating,
+                "regional_narrative": f"Forecast model exhibits {forecast_rating.lower()} performance (R²: {mean_r2}) with {confidence_context}.",
+                "trend_distribution": {
+                    "declining_areas": f"{declining_pct}% ({declining_cells} cells) showing negative trends",
+                    "recovering_areas": f"{recovering_pct}% ({recovering_cells} cells) showing recovery",
+                    "stable_areas": f"{round(100 - declining_pct - recovering_pct, 1)}% stable"
+                },
+                "model_quality": {
+                    "prediction_confidence": forecast_rating,
+                    "r_squared": mean_r2,
+                    "dominant_driver": "climate (GRACE)" if abs(mean_grace_contrib) > 0.5 else "local factors (trend)"
+                },
+                "grace_impact": f"GRACE contributes avg {mean_grace_contrib}m ({round(abs(mean_grace_contrib)/abs(statistics['mean_change_m'])*100 if statistics['mean_change_m'] != 0 else 0, 1)}% of total change)" if grace_available else "No GRACE data used",
+                "comparative_context": {
+                    "grace_contribution": f"{round(abs(mean_grace_contrib) * 100 / (abs(statistics['mean_change_m']) if statistics['mean_change_m'] != 0 else 1), 1)}% of variance explained by GRACE" if grace_available else "0%",
+                    "forecast_reliability": "suitable for planning" if high_confidence else "requires validation"
+                }
             },
             
+            # ✅ ENHANCED KEY INSIGHTS
             "key_insights": [
-                f"Expected {forecast_months}-month change: {statistics['mean_change_m']}m ({'declining' if statistics['mean_change_m'] > 0 else 'recovering'})",
-                f"{statistics['declining_cells']} cells forecasted to decline",
-                f"{statistics['recovering_cells']} cells forecasted to recover",
-                f"Model confidence: {statistics['mean_r_squared']} R² ({'good' if statistics['mean_r_squared'] > 0.7 else 'moderate'})"
+                f"🎯 Forecast Quality: {forecast_rating} (R²: {mean_r2}) - {confidence_context}",
+                f"📉 Declining Trend: {declining_cells} cells ({declining_pct}%) showing negative GWL trends over {forecast_months} months",
+                f"📈 Recovery: {recovering_cells} cells ({recovering_pct}%) showing positive trends",
+                f"🛰️ GRACE Contribution: {round(abs(mean_grace_contrib), 2)}m - {'climate-driven' if abs(mean_grace_contrib) > 0.5 else 'locally-driven'}" if grace_available else "🛰️ No GRACE data - trend-only forecast",
+                f"📏 Model Coverage: {total_cells} grid cells with forecasts ({statistics['success_rate']}% success rate)"
             ]
         }
             
@@ -4932,6 +4839,15 @@ def recharge_planning(
             "site_recommendations": site_recommendations[:100],
             "count": len(site_recommendations),
             
+            # Calculate enhanced metrics for interpretation
+            "_enhanced_metrics": {
+                "total_structures": sum(s['recommended_units'] for s in structure_plan),
+                "total_capacity_mcm": sum(s['total_capacity_mcm'] for s in structure_plan),
+                "per_km2_potential": round(potential_recharge_mcm / total_area_km2, 4) if total_area_km2 > 0 else 0,
+                "critical_sites": sum(1 for s in site_recommendations if s['stress_category'] == 'Critical'),
+                "stressed_sites": sum(1 for s in site_recommendations if s['stress_category'] == 'Stressed')
+            },
+            
             # ✅ ADDED
             "methodology": {
                 "approach": "Runoff-based MAR potential with structure allocation",
@@ -4943,9 +4859,11 @@ def recharge_planning(
                     f"5. Assumed capture efficiency: {capture_fraction*100}% (typical for MAR structures)"
                 ],
                 "formula": "Potential (MCM) = Area × Rainfall × Runoff_Coeff × Capture_Fraction",
-                "full_calculation": f"{round(total_area_km2, 2)} km² × {round(rainfall_m, 3)}m × {runoff_coeff} × {capture_fraction} = {round(potential_recharge_mcm, 2)} MCM"
+                "full_calculation": f"{round(total_area_km2, 2)} km² × {round(rainfall_m, 3)}m × {runoff_coeff} × {capture_fraction} = {round(potential_recharge_mcm, 2)} MCM",
+                "scientific_basis": "Runoff-based MAR potential estimates capture efficiency of artificial structures in augmenting groundwater recharge during monsoon."
             },
             
+            # ✅ ENHANCED INTERPRETATION
             "interpretation": {
                 "structure_types": {
                     "Percolation tank": "Large capacity (50,000 m³), suitable for high-ASI alluvial zones",
@@ -4954,14 +4872,34 @@ def recharge_planning(
                     "Farm pond": "Small capacity (1,000 m³), distributed rural recharge",
                     "Gabion": "Very small (2,500 m³), erosion control + recharge"
                 },
-                "allocation_strategy": "30% percolation tanks, 30% check dams, 20% shafts, 15% ponds, 5% gabions"
+                "allocation_strategy": "30% percolation tanks, 30% check dams, 20% shafts, 15% ponds, 5% gabions",
+                "regional_narrative": f"Region shows {round(potential_recharge_mcm, 2)} MCM/year recharge potential across {round(total_area_km2, 2)} km² with {dominant_lithology} geology (runoff coeff: {runoff_coeff}).",
+                "potential_distribution": {
+                    "total_potential_mcm": round(potential_recharge_mcm, 2),
+                    "per_km2_mcm": round(potential_recharge_mcm / total_area_km2, 4) if total_area_km2 > 0 else 0,
+                    "implementation_scale": "large-scale" if potential_recharge_mcm > 100 else ("medium-scale" if potential_recharge_mcm > 20 else "small-scale"),
+                    "monsoon_dependency": f"{round(rainfall_m*1000, 0)}mm monsoon rainfall"
+                },
+                "implementation_context": {
+                    "structure_count": sum(s['recommended_units'] for s in structure_plan),
+                    "dominant_type": max(structure_plan, key=lambda x: x['allocation_fraction'])['structure_type'] if structure_plan else "N/A",
+                    "site_specific_count": len(site_recommendations),
+                    "critical_priority_sites": sum(1 for s in site_recommendations if s['stress_category'] == 'Critical')
+                },
+                "comparative_context": {
+                    "intensity": f"{round(potential_recharge_mcm / total_area_km2, 4)} MCM/km²",
+                    "lithology_suitability": "excellent" if runoff_coeff >= 0.3 else ("good" if runoff_coeff >= 0.25 else "moderate"),
+                    "rainfall_adequacy": "high" if rainfall_m > 0.4 else ("moderate" if rainfall_m > 0.25 else "limited")
+                }
             },
             
+            # ✅ ENHANCED KEY INSIGHTS
             "key_insights": [
-                f"Total MAR potential: {round(potential_recharge_mcm, 2)} MCM/year",
-                f"Recommended {sum(s['recommended_units'] for s in structure_plan)} total structures",
-                f"Dominant lithology ({dominant_lithology}) influences runoff coefficient ({runoff_coeff})",
-                f"{'Site-specific recommendations based on stress analysis' if site_recommendations else 'Run SASS for site-specific planning'}"
+                f"💧 Recharge Potential: {round(potential_recharge_mcm, 2)} MCM/year across {round(total_area_km2, 2)} km² ({round(potential_recharge_mcm / total_area_km2, 4) if total_area_km2 > 0 else 0} MCM/km²)",
+                f"🏗️ Structure Plan: {sum(s['recommended_units'] for s in structure_plan)} total units - {max(structure_plan, key=lambda x: x['allocation_fraction'])['structure_type'] if structure_plan else 'N/A'} dominant (30%)",
+                f"🌍 Geology: {dominant_lithology.capitalize()} with {runoff_coeff} runoff coefficient - {'excellent' if runoff_coeff >= 0.3 else 'good'} MAR suitability",
+                f"📍 Site Priorities: {sum(1 for s in site_recommendations if s['stress_category'] == 'Critical')} critical sites need immediate recharge shafts" if site_recommendations else "📍 Run SASS module for stress-based site prioritization",
+                f"🌧️ Monsoon Dependency: {round(rainfall_m*1000, 0)}mm rainfall - {'high' if rainfall_m > 0.4 else 'moderate'} recharge adequacy"
             ]
         }
     
@@ -5063,6 +5001,16 @@ def significant_trends(
             "count": len(significant_sites),
             "data": significant_sites,
             
+            # Calculate enhanced metrics
+            "_enhanced_metrics": {
+                "total_sites": len(significant_sites),
+                "declining_pct": round((sites_df['slope_m_per_year'] > 0).sum() / len(sites_df) * 100, 1) if len(sites_df) > 0 else 0,
+                "recovering_pct": round((sites_df['slope_m_per_year'] < 0).sum() / len(sites_df) * 100, 1) if len(sites_df) > 0 else 0,
+                "severe_decline": int((sites_df['slope_m_per_year'] > 0.5).sum()),
+                "high_conf_sites": int((sites_df['p_value'] < 0.01).sum()),
+                "mean_abs_slope": round(float(sites_df['slope_m_per_year'].abs().mean()), 4)
+            },
+            
             # ✅ ADDED
             "methodology": {
                 "approach": f"{'Mann-Kendall trend test' if MK_AVAILABLE else 'OLS linear regression'} with significance testing",
@@ -5077,23 +5025,43 @@ def significant_trends(
                     "p < 0.01": "High significance (99% confidence)",
                     "p < 0.05": "Medium significance (95% confidence)",
                     f"p < {p_threshold}": "Low significance (threshold for inclusion)"
-                }
+                },
+                "scientific_basis": f"{'Mann-Kendall non-parametric test detects monotonic trends without assuming data normality' if MK_AVAILABLE else 'Linear regression identifies long-term directional changes in groundwater levels'}"
             },
             
+            # ✅ ENHANCED INTERPRETATION
             "interpretation": {
                 "slope_meaning": {
                     "positive": "Declining (GWL getting deeper over time)",
                     "negative": "Recovering (GWL getting shallower over time)"
                 },
-                "trend_strength": f"Mean slope: {round(float(sites_df['slope_m_per_year'].mean()), 3)}m/year"
+                "trend_strength": f"Mean slope: {round(float(sites_df['slope_m_per_year'].mean()), 3)}m/year",
+                "regional_narrative": f"Region exhibits {'CRITICAL' if (sites_df['slope_m_per_year'] > 0).sum() / len(sites_df) > 0.7 else ('CONCERNING' if (sites_df['slope_m_per_year'] > 0).sum() / len(sites_df) > 0.5 else 'STABLE')} trends with {round((sites_df['slope_m_per_year'] > 0).sum() / len(sites_df) * 100, 1)}% of significant sites showing decline.",
+                "trend_distribution": {
+                    "declining_sites": f"{int((sites_df['slope_m_per_year'] > 0).sum())} ({round((sites_df['slope_m_per_year'] > 0).sum() / len(sites_df) * 100, 1)}%)",
+                    "recovering_sites": f"{int((sites_df['slope_m_per_year'] < 0).sum())} ({round((sites_df['slope_m_per_year'] < 0).sum() / len(sites_df) * 100, 1)}%)",
+                    "severe_decline": f"{int((sites_df['slope_m_per_year'] > 0.5).sum())} sites > 0.5m/year",
+                    "assessment": "system-wide decline" if (sites_df['slope_m_per_year'] > 0).sum() / len(sites_df) > 0.7 else "localized variability"
+                },
+                "confidence_analysis": {
+                    "high_confidence": f"{int((sites_df['p_value'] < 0.01).sum())} sites (p<0.01)",
+                    "medium_confidence": f"{int((sites_df['p_value'] < 0.05).sum() - (sites_df['p_value'] < 0.01).sum())} sites (0.01<p<0.05)",
+                    "method_reliability": "excellent" if MK_AVAILABLE else "good"
+                },
+                "comparative_context": {
+                    "mean_decline_rate": f"{round(float(sites_df[sites_df['slope_m_per_year'] > 0]['slope_m_per_year'].mean()), 3) if (sites_df['slope_m_per_year'] > 0).any() else 0}m/year",
+                    "trend_severity": "SEVERE" if abs(sites_df['slope_m_per_year'].mean()) > 0.3 else ("MODERATE" if abs(sites_df['slope_m_per_year'].mean()) > 0.1 else "MILD"),
+                    "sustainability_outlook": "unsustainable" if (sites_df['slope_m_per_year'] > 0).sum() / len(sites_df) > 0.7 else "manageable"
+                }
             },
             
+            # ✅ ENHANCED KEY INSIGHTS
             "key_insights": [
-                f"{len(significant_sites)} sites have statistically significant trends",
-                f"{int((sites_df['slope_m_per_year'] > 0).sum())} sites declining",
-                f"{int((sites_df['slope_m_per_year'] < 0).sum())} sites recovering",
-                f"{int((sites_df['p_value'] < 0.01).sum())} sites highly significant (p < 0.01)",
-                f"Average trend: {round(float(sites_df['slope_m_per_year'].mean()), 3)}m/year"
+                f"📊 Trend Analysis: {len(significant_sites)} sites with statistically significant trends (p<{p_threshold}) - {round((sites_df['slope_m_per_year'] > 0).sum() / len(sites_df) * 100, 1)}% declining",
+                f"📉 Declining Trend: {int((sites_df['slope_m_per_year'] > 0).sum())} sites showing long-term water level decline - {int((sites_df['slope_m_per_year'] > 0.5).sum())} SEVERE (>0.5m/year)",
+                f"📈 Recovery: {int((sites_df['slope_m_per_year'] < 0).sum())} sites showing recovery trends - positive signs in {round((sites_df['slope_m_per_year'] < 0).sum() / len(sites_df) * 100, 1)}% of region",
+                f"🎯 Confidence: {int((sites_df['p_value'] < 0.01).sum())} high-confidence sites (99%) using {'Mann-Kendall' if MK_AVAILABLE else 'OLS'} method",
+                f"⚖️ System Health: Mean trend {round(float(sites_df['slope_m_per_year'].mean()), 3)}m/year - {'UNSUSTAINABLE' if (sites_df['slope_m_per_year'] > 0).sum() / len(sites_df) > 0.7 else 'CONCERNING' if (sites_df['slope_m_per_year'] > 0).sum() / len(sites_df) > 0.5 else 'STABLE'} outlook"
             ]
         }
     
@@ -5796,6 +5764,83 @@ def advanced_modules_index():
     }
 
 # =============================================================================
+# RAG AGENT ENDPOINT
+# =============================================================================
+
+class AgentRequest(BaseModel):
+    question: str
+    map_context: Optional[dict] = None
+
+class AgentResponse(BaseModel):
+    answer: str
+    success: bool
+    error: Optional[str] = None
+
+@app.post("/api/agent")
+async def query_rag_agent(request: AgentRequest):
+    """
+    🤖 RAG Agent - Natural Language Groundwater Query System
+    
+    Query the intelligent RAG (Retrieval-Augmented Generation) agent that has access to:
+    - 📚 Knowledge Base: Definitions, formulas, analysis methodologies
+    - 🗄️ Database Tools: Groundwater wells, GRACE satellite, rainfall, aquifers
+    - 📊 Timeseries Analysis: Trend detection, correlation analysis
+    
+    **Example Questions:**
+    - "What is specific yield?"
+    - "Show me groundwater levels in Kerala"
+    - "Explain how ASI is calculated"
+    - "What are the aquifers in Maharashtra?"
+    - "Show me the Mann-Kendall trend for Punjab"
+    
+    **Parameters:**
+    - question: Natural language question
+    - map_context: (Optional) Current map view context from frontend
+    
+    **Returns:**
+    - answer: The agent's response
+    - success: Whether the query was successful
+    - error: Error message if any
+    """
+    try:
+        # Import the query_agent function from testingragsql
+        
+        
+        print(f"\n🤖 Agent Query: {request.question[:100]}...")
+        
+        # Query the agent with optional map context
+        result = query_agent(
+            question=request.question,
+            map_context=request.map_context,
+            verbose=False
+        )
+        
+        return {
+            "answer": result.get("output", "No response generated"),
+            "success": result.get("success", False),
+            "error": result.get("error")
+        }
+    
+    except ImportError as e:
+        error_msg = f"RAG agent not available: {str(e)}"
+        print(f"❌ {error_msg}")
+        return {
+            "answer": "The RAG agent is not available. Please ensure testingragsql.py is properly configured with Ollama running.",
+            "success": False,
+            "error": error_msg
+        }
+    
+    except Exception as e:
+        error_msg = f"Agent error: {str(e)}"
+        print(f"❌ {error_msg}")
+        print(traceback.format_exc())
+        return {
+            "answer": "An error occurred while processing your question. Please try rephrasing or check the server logs.",
+            "success": False,
+            "error": error_msg
+        }
+
+# =============================================================================
 # RUN SERVER
 # =============================================================================
 
@@ -5806,14 +5851,13 @@ if __name__ == "__main__":
     print("="*80)
     print(f"📊 GRACE Months Available: {len(GRACE_BAND_MAPPING)}")
     print(f"🌧️  Rainfall Years Available: {len(RAINFALL_TABLES)}")
-    print(f"🤖 Chatbot Status: {'✅ Enabled' if CHATBOT_ENABLED else '⚠️  Disabled'}")
+    print(f"🤖 RAG Agent: /api/agent endpoint available")
     print(f"🔗 Unified Timeseries: Wells + GRACE + Rainfall")
     print(f"✅ FIXED: GRACE/Rainfall queries now match working map overlay patterns")
     print(f"🔍 NEW: Diagnostic endpoint at /api/debug/raster-info")
     print("="*80)
     print("\n🌐 API Documentation: http://localhost:8000/docs")
     print("🏥 Health Check: http://localhost:8000/health")
-    print("💬 Chatbot: POST http://localhost:8000/api/chat")
     print("📊 Unified Timeseries: GET http://localhost:8000/api/wells/timeseries")
     print("🔍 Diagnostic: GET http://localhost:8000/api/debug/raster-info")
     print("\n")
