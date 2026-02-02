@@ -11,8 +11,8 @@ export default function StorageVsGWR({ storageVsGwrData }: StorageVsGWRProps) {
   return (
     <div className="bg-white rounded-xl shadow-2xl p-6 mb-8 border-2 border-cyan-400">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2">
-          <span>📊</span> Storage Change vs Annual GWR
+        <h3 className="text-lg font-bold text-gray-800">
+          Storage Change vs Annual GWR
         </h3>
       </div>
 

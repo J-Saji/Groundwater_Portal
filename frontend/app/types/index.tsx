@@ -24,6 +24,7 @@ export interface AquiferType {
   per_cm: number;
   stname: string;
   geometry: Geometry;
+  area_sqm?: number;
   center: [number, number] | null;
 }
 
@@ -408,8 +409,30 @@ export interface ASIResponse {
   methodology: {
     approach: string;
     quantile_stretch: { low: number; high: number };
-    interpretation: string;
+    steps?: string[];
+    formula?: string;
+    data_source?: string;
+    scientific_basis?: string;
   };
+  interpretation?: {
+    score_meaning?: Record<string, string>;
+    regional_rating?: string;
+    regional_narrative?: string;
+    high_suitability_percentage?: number;
+    low_suitability_percentage?: number;
+    spatial_distribution?: {
+      high_quality_areas?: string;
+      challenging_areas?: string;
+      assessment?: string;
+    };
+    comparative_context?: {
+      mean_vs_median?: string;
+      variability?: string;
+      range_span?: string;
+    };
+    [key: string]: any;
+  };
+  key_insights?: string[];
 }
 
 export interface NetworkDensitySitePoint {
@@ -443,18 +466,37 @@ export interface NetworkDensityResponse {
     avg_density: number;
     avg_local_density: number;
     median_observations: number;
-    mean_gridded_density: number;
-    max_gridded_density: number;
+    mean_gridded_density?: number;
+    max_gridded_density?: number;
+    grid_cells?: number;
   };
   map1_site_level: {
     count: number;
     data: NetworkDensitySitePoint[];
+    description?: string;
   };
   map2_gridded: {
     count: number;
-    grid_resolution: string;
+    grid_resolution?: string;
     data: NetworkDensityGridPoint[];
+    description?: string;
   };
+  methodology?: {
+    approach?: string;
+    steps?: string[];
+    signal_strength_formula?: string;
+    density_formula?: string;
+    [key: string]: any;
+  };
+  interpretation?: {
+    strength_levels?: Record<string, string>;
+    density_quality?: string;
+    regional_narrative?: string;
+    spatial_distribution?: Record<string, any>;
+    comparative_context?: Record<string, any>;
+    [key: string]: any;
+  };
+  key_insights?: string[];
 }
 
 export interface SASSPoint {
@@ -478,9 +520,26 @@ export interface SASSResponse {
     max_sass: number;
     min_sass: number;
     stressed_sites: number;
+    critical_sites?: number;
   };
   count: number;
   data: SASSPoint[];
+  methodology?: {
+    approach?: string;
+    components?: any[];
+    steps?: string[];
+    [key: string]: any;
+  };
+  interpretation?: {
+    stress_levels?: Record<string, string>;
+    regional_status?: string;
+    regional_narrative?: string;
+    stress_distribution?: Record<string, any>;
+    spatial_assessment?: string;
+    comparative_context?: Record<string, any>;
+    [key: string]: any;
+  };
+  key_insights?: string[];
 }
 
 export interface DivergencePoint {
@@ -505,6 +564,21 @@ export interface DivergenceResponse {
   };
   count: number;
   data: DivergencePoint[];
+  methodology?: {
+    approach?: string;
+    steps?: string[];
+    formula?: string;
+    [key: string]: any;
+  };
+  interpretation?: {
+    divergence_meaning?: Record<string, string>;
+    regional_assessment?: string;
+    regional_narrative?: string;
+    spatial_distribution?: Record<string, any>;
+    comparative_context?: Record<string, any>;
+    [key: string]: any;
+  };
+  key_insights?: string[];
 }
 
 export interface ForecastPoint {
@@ -542,6 +616,21 @@ export interface ForecastResponse {
   };
   count: number;
   data: ForecastPoint[];
+  methodology?: {
+    approach?: string;
+    steps?: string[];
+    model?: string;
+    [key: string]: any;
+  };
+  interpretation?: {
+    model_quality?: Record<string, string>;
+    regional_outlook?: string;
+    regional_narrative?: string;
+    trend_distribution?: Record<string, any>;
+    comparative_context?: Record<string, any>;
+    [key: string]: any;
+  };
+  key_insights?: string[];
 }
 
 export interface RechargeStructure {
@@ -579,6 +668,22 @@ export interface RechargeResponse {
   structure_plan: RechargeStructure[];
   site_recommendations: RechargeSiteRecommendation[];
   count: number;
+  methodology?: {
+    approach?: string;
+    steps?: string[];
+    formula?: string;
+    [key: string]: any;
+  };
+  interpretation?: {
+    potential_rating?: string;
+    structure_mix?: string;
+    regional_narrative?: string;
+    potential_distribution?: Record<string, any>;
+    implementation_context?: Record<string, any>;
+    comparative_context?: Record<string, any>;
+    [key: string]: any;
+  };
+  key_insights?: string[];
 }
 
 export interface SignificantTrendPoint {
@@ -607,6 +712,22 @@ export interface SignificantTrendsResponse {
   };
   count: number;
   data: SignificantTrendPoint[];
+  methodology?: {
+    approach?: string;
+    steps?: string[];
+    test_used?: string;
+    [key: string]: any;
+  };
+  interpretation?: {
+    significance_levels?: Record<string, string>;
+    regional_status?: string;
+    regional_narrative?: string;
+    trend_distribution?: Record<string, any>;
+    confidence_analysis?: Record<string, any>;
+    comparative_context?: Record<string, any>;
+    [key: string]: any;
+  };
+  key_insights?: string[];
 }
 
 export interface ChangepointCoverageSite {
@@ -662,6 +783,18 @@ export interface ChangepointResponse {
     data: ChangepointCoverageSite[];
     description: string;
   };
+  methodology?: {
+    approach?: string;
+    steps?: string[];
+    algorithm_details?: string;
+    [key: string]: any;
+  };
+  interpretation?: {
+    detection_rate_meaning?: Record<string, string>;
+    changepoint_significance?: string;
+    [key: string]: any;
+  };
+  key_insights?: string[];
 }
 
 export interface LagCorrelationPoint {
@@ -689,6 +822,18 @@ export interface LagCorrelationResponse {
   };
   count: number;
   data: LagCorrelationPoint[];
+  methodology?: {
+    approach?: string;
+    steps?: string[];
+    correlation_method?: string;
+    [key: string]: any;
+  };
+  interpretation?: {
+    lag_ranges?: Record<string, string>;
+    regional_response_time?: string;
+    [key: string]: any;
+  };
+  key_insights?: string[];
 }
 
 export interface HotspotPoint {
@@ -728,4 +873,16 @@ export interface HotspotsResponse {
   clusters: HotspotCluster[];
   count: number;
   data: HotspotPoint[];
+  methodology?: {
+    approach?: string;
+    steps?: string[];
+    clustering_algorithm?: string;
+    [key: string]: any;
+  };
+  interpretation?: {
+    cluster_severity?: Record<string, string>;
+    regional_risk?: string;
+    [key: string]: any;
+  };
+  key_insights?: string[];
 }

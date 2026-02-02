@@ -109,18 +109,74 @@ export function useMapContext({
     const dataSummary: any = {};
 
     // Aquifers context
-    if (showAquifers && aquifers.length > 0) {
-      const aquiferTypes = aquifers.reduce((acc, a) => {
-        acc[a.aquifer] = (acc[a.aquifer] || 0) + 1;
-        return acc;
-      }, {} as Record<string, number>);
+    if (aquifers && aquifers.length > 0) {
+      // Group by aquifer TYPE (Confined/Unconfined/Semi-confined)
+      const aquiferAreaByType: { [key: string]: number } = {};
+      const lithologyByType: { [key: string]: { [lithology: string]: number } } = {};
+
+      aquifers.forEach(a => {
+        const type = a.aquifers || a.aquifer || 'Unknown';
+        const lithology = a.aquifer || 'Unknown'; // Lithology name
+
+        // Sum area by aquifer type
+        aquiferAreaByType[type] = (aquiferAreaByType[type] || 0) + (a.area_sqm || 0);
+
+        // Track lithology breakdown within each type
+        if (!lithologyByType[type]) {
+          lithologyByType[type] = {};
+        }
+        lithologyByType[type][lithology] = (lithologyByType[type][lithology] || 0) + (a.area_sqm || 0);
+      });
+
+      // Find dominant type by area (not count)
+      const dominantByArea = Object.entries(aquiferAreaByType)
+        .sort((a, b) => b[1] - a[1])[0];
+
+      const dominantType = dominantByArea?.[0] || 'Unknown';
+      const dominantArea = dominantByArea?.[1] || 0;
+
+      // Get lithology breakdown for dominant type
+      const dominantLithologies = lithologyByType[dominantType] || {};
+      const topLithologies = Object.entries(dominantLithologies)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)  // Top 3 lithologies
+        .map(([lith, area]) => ({
+          name: lith,
+          area_km2: (area / 1_000_000).toFixed(2)
+        }));
+
+      // DEBUG: Log aquifer areas
+      console.log('🔍 Aquifer Area Calculation:', {
+        totalAquifers: aquifers.length,
+        areaByType: Object.entries(aquiferAreaByType)
+          .map(([type, area]) => ({ type, area_sqm: area, area_km2: (area / 1_000_000).toFixed(2) }))
+          .sort((a, b) => b.area_sqm - a.area_sqm),
+        lithologyBreakdown: Object.entries(lithologyByType).map(([type, lithos]) => ({
+          aquifer_type: type,
+          lithologies: Object.entries(lithos).map(([lith, area]) => ({
+            lithology: lith,
+            area_km2: (area / 1_000_000).toFixed(2)
+          })).sort((a, b) => parseFloat(b.area_km2) - parseFloat(a.area_km2))
+        })),
+        sampleAquifer: aquifers[0]
+      });
+
+      console.log('✅ Dominant Aquifer:', dominantType, `(${(dominantArea / 1_000_000).toFixed(2)} km²)`);
+      console.log('   Top Lithologies:', topLithologies.map(l => `${l.name} (${l.area_km2} km²)`).join(', '));
 
       dataSummary.aquifers = {
         count: aquifers.length,
-        types: Object.entries(aquiferTypes).map(([type, count]) => ({ type, count })),
-        dominant_type: Object.entries(aquiferTypes).sort((a, b) => b[1] - a[1])[0]?.[0],
-        avg_zone_m: aquifers.reduce((sum, a) => sum + (a.zone_m || 0), 0) / aquifers.length,
-        avg_mbgl: aquifers.reduce((sum, a) => sum + (a.avg_mbgl || 0), 0) / aquifers.length
+        types: Object.entries(aquiferAreaByType).map(([type, area]) => ({
+          type,
+          area_sqm: area,
+          area_sqkm: area / 1_000_000
+        })),
+        dominant_type: dominantType,
+        dominant_area_sqkm: dominantArea / 1_000_000,
+        dominant_lithologies: topLithologies,  // NEW: Top lithologies in dominant type
+        total_area_sqkm: Object.values(aquiferAreaByType).reduce((sum, a) => sum + a, 0) / 1_000_000,
+        avg_zone_m: aquifers.reduce((sum, a) => sum + (a.zone_m || 0), 0) / (aquifers.length || 1),
+        avg_mbgl: aquifers.reduce((sum, a) => sum + (a.avg_mbgl || 0), 0) / (aquifers.length || 1)
       };
     }
 
@@ -225,7 +281,9 @@ export function useMapContext({
         module: asiData.module,
         statistics: asiData.statistics,
         polygons_analyzed: asiData.count,
-        methodology: asiData.methodology
+        methodology: asiData.methodology,
+        interpretation: asiData.interpretation,
+        key_insights: asiData.key_insights
       };
     }
 
@@ -234,7 +292,10 @@ export function useMapContext({
         module: networkDensityData.module,
         statistics: networkDensityData.statistics,
         site_level_count: networkDensityData.map1_site_level.count,
-        grid_count: networkDensityData.map2_gridded.count
+        grid_count: networkDensityData.map2_gridded.count,
+        methodology: networkDensityData.methodology,
+        interpretation: networkDensityData.interpretation,
+        key_insights: networkDensityData.key_insights
       };
     }
 
@@ -243,7 +304,10 @@ export function useMapContext({
         module: sassData.module,
         formula: sassData.formula,
         statistics: sassData.statistics,
-        sites_analyzed: sassData.count
+        sites_analyzed: sassData.count,
+        methodology: sassData.methodology,
+        interpretation: sassData.interpretation,
+        key_insights: sassData.key_insights
       };
     }
 
@@ -251,7 +315,10 @@ export function useMapContext({
       dataSummary.divergence = {
         module: divergenceData.module,
         statistics: divergenceData.statistics,
-        pixels_analyzed: divergenceData.count
+        pixels_analyzed: divergenceData.count,
+        methodology: divergenceData.methodology,
+        interpretation: divergenceData.interpretation,
+        key_insights: divergenceData.key_insights
       };
     }
 
@@ -261,7 +328,10 @@ export function useMapContext({
         method: forecastData.method,
         statistics: forecastData.statistics,
         forecast_months: forecastData.parameters.forecast_months,
-        grid_cells: forecastData.count
+        grid_cells: forecastData.count,
+        methodology: forecastData.methodology,
+        interpretation: forecastData.interpretation,
+        key_insights: forecastData.key_insights
       };
     }
 
@@ -270,7 +340,10 @@ export function useMapContext({
         module: rechargeData.module,
         potential: rechargeData.potential,
         analysis_parameters: rechargeData.analysis_parameters,
-        structure_plan: rechargeData.structure_plan
+        structure_plan: rechargeData.structure_plan,
+        methodology: rechargeData.methodology,
+        interpretation: rechargeData.interpretation,
+        key_insights: rechargeData.key_insights
       };
     }
 
@@ -278,7 +351,10 @@ export function useMapContext({
       dataSummary.significant_trends = {
         module: significantTrendsData.module,
         statistics: significantTrendsData.statistics,
-        p_threshold: significantTrendsData.parameters.p_threshold
+        p_threshold: significantTrendsData.parameters.p_threshold,
+        methodology: significantTrendsData.methodology,
+        interpretation: significantTrendsData.interpretation,
+        key_insights: significantTrendsData.key_insights
       };
     }
 
@@ -286,7 +362,10 @@ export function useMapContext({
       dataSummary.changepoints = {
         module: changepointsData.module,
         statistics: changepointsData.statistics,
-        changepoints_found: changepointsData.changepoints.count
+        changepoints_found: changepointsData.changepoints.count,
+        methodology: changepointsData.methodology,
+        interpretation: changepointsData.interpretation,
+        key_insights: changepointsData.key_insights
       };
     }
 
@@ -294,7 +373,10 @@ export function useMapContext({
       dataSummary.lag_correlation = {
         module: lagCorrelationData.module,
         statistics: lagCorrelationData.statistics,
-        sites_analyzed: lagCorrelationData.count
+        sites_analyzed: lagCorrelationData.count,
+        methodology: lagCorrelationData.methodology,
+        interpretation: lagCorrelationData.interpretation,
+        key_insights: lagCorrelationData.key_insights
       };
     }
 
@@ -302,7 +384,10 @@ export function useMapContext({
       dataSummary.hotspots = {
         module: hotspotsData.module,
         statistics: hotspotsData.statistics,
-        clusters: hotspotsData.clusters
+        clusters: hotspotsData.clusters,
+        methodology: hotspotsData.methodology,
+        interpretation: hotspotsData.interpretation,
+        key_insights: hotspotsData.key_insights
       };
     }
 

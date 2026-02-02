@@ -47,6 +47,7 @@ import LoadingSpinner from './components/LoadingSpinner';
 import AlertToast from './components/AlertToast';
 import Timeseries from './components/Timeseries';
 import StorageVsGWR from './Components/StorageVsGWR';
+import DisclaimerModal from "./Components/DisclaimerModal";
 
 import ASIModule from './components/AdvancedModules/ASIModule';
 import NetworkDensityModule from './components/AdvancedModules/NetworkDensityModule';
@@ -130,6 +131,7 @@ export default function Home() {
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(true);
   const [isTimeseriesMinimized, setIsTimeseriesMinimized] = useState(false);
   const [isStorageVsGWRMinimized, setIsStorageVsGWRMinimized] = useState(false);
+  const [disclaimerAccepted, setDisclaimerAccepted] = useState(false);
 
   const showAlert = (message: string, type: "info" | "warning" | "error" | "success" = "info") => {
     setAlertMessage(message);
@@ -275,8 +277,22 @@ export default function Home() {
     }
   };
 
+  // Clear advanced module data when location changes
   useEffect(() => {
     if (selectedAdvancedModule) {
+      // Clear all advanced module data to prevent showing stale data
+      setAsiData(null);
+      setNetworkDensityData(null);
+      setSassData(null);
+      setDivergenceData(null);
+      setForecastData(null);
+      setRechargeData(null);
+      setSignificantTrendsData(null);
+      setChangepointsData(null);
+      setLagCorrelationData(null);
+      setHotspotsData(null);
+
+      // Reload the module with new location
       loadAdvancedModule(selectedAdvancedModule);
     }
   }, [selectedAdvancedModule, selectedState, selectedDistrict, selectedYear, selectedMonth]);
@@ -613,7 +629,20 @@ export default function Home() {
     if (selectedAdvancedModule === 'HOTSPOTS' && hotspotsData) {
       return <HotspotsModule data={hotspotsData} center={center} zoom={zoom} mapKey={mapKey} districtGeo={districtGeo} />;
     }
-    return null;
+
+    // If module is selected but data hasn't loaded yet, show loading message
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center">
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
+          <p className="text-gray-600 font-medium">Loading {getModuleName(selectedAdvancedModule)}...</p>
+          <p className="text-gray-400 text-sm mt-2">
+            {selectedState && `for ${selectedState}`}
+            {selectedDistrict && ` / ${selectedDistrict}`}
+          </p>
+        </div>
+      </div>
+    );
   };
 
   // Determine if split view is active (advanced module showing)
@@ -621,339 +650,347 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-slate-100">
-      {alertMessage && (
-        <AlertToast
-          message={alertMessage}
-          type={alertType}
-          onClose={() => setAlertMessage("")}
-        />
-      )}
+      {/* Disclaimer Modal - Shows on first visit */}
+      <DisclaimerModal onAccept={() => setDisclaimerAccepted(true)} />
 
-      {/* Header */}
-      <Header onChatToggle={() => setIsChatOpen(!isChatOpen)} isChatOpen={isChatOpen} />
+      {/* Main App Content - Only show when disclaimer is accepted */}
+      {disclaimerAccepted && (
+        <>
+          {alertMessage && (
+            <AlertToast
+              message={alertMessage}
+              type={alertType}
+              onClose={() => setAlertMessage("")}
+            />
+          )}
 
-      {/* Left Sidebar */}
-      <Sidebar
-        isExpanded={isSidebarExpanded}
-        onToggle={() => setIsSidebarExpanded(!isSidebarExpanded)}
-        states={states}
-        districts={districts}
-        selectedState={selectedState}
-        selectedDistrict={selectedDistrict}
-        selectedYear={selectedYear}
-        selectedMonth={selectedMonth}
-        availableYears={availableYears}
-        showAquifers={showAquifers}
-        showGWR={showGWR}
-        showGrace={showGrace}
-        showRainfall={showRainfall}
-        showWells={showWells}
-        showTimeseries={showTimeseries}
-        showStorageVsGWR={showStorageVsGWR}
-        onStateChange={setSelectedState}
-        onDistrictChange={setSelectedDistrict}
-        onYearChange={setSelectedYear}
-        onMonthChange={setSelectedMonth}
-        onToggleAquifers={() => setShowAquifers(!showAquifers)}
-        onToggleGWR={() => setShowGWR(!showGWR)}
-        onToggleGrace={() => setShowGrace(!showGrace)}
-        onToggleRainfall={() => setShowRainfall(!showRainfall)}
-        onToggleWells={() => setShowWells(!showWells)}
-        onToggleTimeseries={() => setShowTimeseries(!showTimeseries)}
-        onToggleStorageVsGWR={() => setShowStorageVsGWR(!showStorageVsGWR)}
-      />
+          {/* Header */}
+          <Header onChatToggle={() => setIsChatOpen(!isChatOpen)} isChatOpen={isChatOpen} />
 
-      {/* Advanced Modules Menu Icon (Top Right) */}
-      <button
-        onClick={() => setShowAdvancedMenu(true)}
-        className="fixed top-16 right-6 w-11 h-11 bg-slate-700 hover:bg-slate-600 text-white rounded-lg shadow-lg hover:shadow-xl transition-all z-40 flex items-center justify-center border border-slate-600"
-        title="Advanced Analytics"
-      >
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-        </svg>
-      </button>
+          {/* Left Sidebar */}
+          <Sidebar
+            isExpanded={isSidebarExpanded}
+            onToggle={() => setIsSidebarExpanded(!isSidebarExpanded)}
+            states={states}
+            districts={districts}
+            selectedState={selectedState}
+            selectedDistrict={selectedDistrict}
+            selectedYear={selectedYear}
+            selectedMonth={selectedMonth}
+            availableYears={availableYears}
+            showAquifers={showAquifers}
+            showGWR={showGWR}
+            showGrace={showGrace}
+            showRainfall={showRainfall}
+            showWells={showWells}
+            showTimeseries={showTimeseries}
+            showStorageVsGWR={showStorageVsGWR}
+            onStateChange={setSelectedState}
+            onDistrictChange={setSelectedDistrict}
+            onYearChange={setSelectedYear}
+            onMonthChange={setSelectedMonth}
+            onToggleAquifers={() => setShowAquifers(!showAquifers)}
+            onToggleGWR={() => setShowGWR(!showGWR)}
+            onToggleGrace={() => setShowGrace(!showGrace)}
+            onToggleRainfall={() => setShowRainfall(!showRainfall)}
+            onToggleWells={() => setShowWells(!showWells)}
+            onToggleTimeseries={() => setShowTimeseries(!showTimeseries)}
+            onToggleStorageVsGWR={() => setShowStorageVsGWR(!showStorageVsGWR)}
+          />
 
-      {/* Advanced Modules Menu */}
-      <AdvancedModulesMenu
-        isOpen={showAdvancedMenu}
-        onClose={() => setShowAdvancedMenu(false)}
-        onSelectModule={handleAdvancedModuleSelect}
-        selectedModule={selectedAdvancedModule}
-      />
+          {/* Advanced Modules Menu Icon (Top Right) */}
+          <button
+            onClick={() => setShowAdvancedMenu(true)}
+            className="fixed top-16 right-6 w-11 h-11 bg-slate-700 hover:bg-slate-600 text-white rounded-lg shadow-lg hover:shadow-xl transition-all z-40 flex items-center justify-center border border-slate-600"
+            title="Advanced Analytics"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+            </svg>
+          </button>
 
-      {/* Main Content Area */}
-      <div
-        className={`transition-all duration-300 ${showTimeseries || showStorageVsGWR
-            ? 'p-4'
-            : (showAquifers || showGWR || showGrace || showRainfall || showWells || selectedAdvancedModule ? 'p-2' : '')
-          } ${isSidebarExpanded ? 'ml-80' : 'ml-14'}`}
-        style={{ height: 'calc(100vh - 3.5rem)' }}
-      >
-        {(showAquifers || showGWR || showGrace || showRainfall || showWells || selectedAdvancedModule) ? (
-          // Split View: India Map (Left) + Layer-Specific Map or Advanced Module (Right)
-          <div className="h-full grid grid-cols-2 gap-4">
-            {/* Left: India Map - Shows layers when advanced module is open, otherwise plain overview */}
-            <div className="h-full relative" style={{ zIndex: 1 }}>
-              <div className="h-full w-full rounded-lg overflow-hidden shadow-lg border border-slate-200 relative">
-                <IndiaMap
-                  center={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? center : [22.9734, 78.6569]}
-                  zoom={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? zoom : 5}
-                  mapKey={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? mapKey : 0}
-                  districtGeo={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? districtGeo : null}
-                  aquifers={selectedAdvancedModule && showAquifers ? aquifers : []}
-                  graceData={selectedAdvancedModule && showGrace ? graceData : []}
-                  rainfallData={selectedAdvancedModule && showRainfall ? rainfallData : []}
-                  wellsData={selectedAdvancedModule && showWells ? wellsData : []}
-                  gwrData={selectedAdvancedModule && showGWR ? gwrData : null}
-                  showAquifers={selectedAdvancedModule ? showAquifers : false}
-                  showGrace={selectedAdvancedModule ? showGrace : false}
-                  showRainfall={selectedAdvancedModule ? showRainfall : false}
-                  showWells={selectedAdvancedModule ? showWells : false}
-                  showGWR={selectedAdvancedModule ? showGWR : false}
-                />
-                <div className="absolute top-3 left-3 bg-white px-3 py-1.5 rounded-md shadow-md border border-slate-300">
-                  <p className="text-xs font-semibold text-slate-700">
-                    {selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? (
-                      <>
-                        {showAquifers && 'Aquifers Layer'}
-                        {showGWR && 'GWR Layer'}
-                        {showGrace && 'GRACE Layer'}
-                        {showRainfall && 'Rainfall Layer'}
-                        {showWells && 'Wells Layer'}
-                        {selectedState && ` - ${selectedState}`}
-                        {selectedDistrict && ` / ${selectedDistrict}`}
-                      </>
-                    ) : (
-                      'India Overview'
-                    )}
-                  </p>
+          {/* Advanced Modules Menu */}
+          <AdvancedModulesMenu
+            isOpen={showAdvancedMenu}
+            onClose={() => setShowAdvancedMenu(false)}
+            onSelectModule={handleAdvancedModuleSelect}
+            selectedModule={selectedAdvancedModule}
+          />
+
+          {/* Main Content Area */}
+          <div
+            className={`transition-all duration-300 ${showTimeseries || showStorageVsGWR
+              ? 'p-4'
+              : (showAquifers || showGWR || showGrace || showRainfall || showWells || selectedAdvancedModule ? 'p-2' : '')
+              } ${isSidebarExpanded ? 'ml-80' : 'ml-14'}`}
+            style={{ height: 'calc(100vh - 3.5rem)' }}
+          >
+            {(showAquifers || showGWR || showGrace || showRainfall || showWells || selectedAdvancedModule) ? (
+              // Split View: India Map (Left) + Layer-Specific Map or Advanced Module (Right)
+              <div className="h-full grid grid-cols-2 gap-4">
+                {/* Left: India Map - Shows layers when advanced module is open, otherwise plain overview */}
+                <div className="h-full relative" style={{ zIndex: 1 }}>
+                  <div className="h-full w-full rounded-lg overflow-hidden shadow-lg border border-slate-200 relative">
+                    <IndiaMap
+                      center={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? center : [22.9734, 78.6569]}
+                      zoom={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? zoom : 5}
+                      mapKey={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? mapKey : 0}
+                      districtGeo={selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? districtGeo : null}
+                      aquifers={selectedAdvancedModule && showAquifers ? aquifers : []}
+                      graceData={selectedAdvancedModule && showGrace ? graceData : []}
+                      rainfallData={selectedAdvancedModule && showRainfall ? rainfallData : []}
+                      wellsData={selectedAdvancedModule && showWells ? wellsData : []}
+                      gwrData={selectedAdvancedModule && showGWR ? gwrData : null}
+                      showAquifers={selectedAdvancedModule ? showAquifers : false}
+                      showGrace={selectedAdvancedModule ? showGrace : false}
+                      showRainfall={selectedAdvancedModule ? showRainfall : false}
+                      showWells={selectedAdvancedModule ? showWells : false}
+                      showGWR={selectedAdvancedModule ? showGWR : false}
+                    />
+                    <div className="absolute top-3 left-3 bg-white px-3 py-1.5 rounded-md shadow-md border border-slate-300">
+                      <p className="text-xs font-semibold text-slate-700">
+                        {selectedAdvancedModule && (showAquifers || showGWR || showGrace || showRainfall || showWells) ? (
+                          <>
+                            {showAquifers && 'Aquifers Layer'}
+                            {showGWR && 'GWR Layer'}
+                            {showGrace && 'GRACE Layer'}
+                            {showRainfall && 'Rainfall Layer'}
+                            {showWells && 'Wells Layer'}
+                            {selectedState && ` - ${selectedState}`}
+                            {selectedDistrict && ` / ${selectedDistrict}`}
+                          </>
+                        ) : (
+                          'India Overview'
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right: Zoomed Map with Selected Layer OR Advanced Module */}
+                <div className="h-full relative" style={{ zIndex: 10 }}>
+                  {selectedAdvancedModule ? (
+                    // Advanced Module Panel
+                    <AdvancedModulePanel
+                      moduleName={getModuleName(selectedAdvancedModule)}
+                      onClose={() => setSelectedAdvancedModule('')}
+                    >
+                      {renderAdvancedModuleContent()}
+                    </AdvancedModulePanel>
+                  ) : (
+                    // Regular Layer Map (Zoomed to selected state/district)
+                    <div className="h-full w-full rounded-lg overflow-hidden shadow-lg border border-blue-300 relative">
+                      <IndiaMap
+                        center={center}
+                        zoom={zoom}
+                        mapKey={mapKey}
+                        districtGeo={districtGeo}
+                        aquifers={showAquifers ? aquifers : []}
+                        graceData={showGrace ? graceData : []}
+                        rainfallData={showRainfall ? rainfallData : []}
+                        wellsData={showWells ? wellsData : []}
+                        gwrData={showGWR ? gwrData : null}
+                        showAquifers={showAquifers}
+                        showGrace={showGrace}
+                        showRainfall={showRainfall}
+                        showWells={showWells}
+                        showGWR={showGWR}
+                      />
+                      <div className="absolute top-3 left-3 bg-white px-3 py-1.5 rounded-md shadow-md border border-blue-400">
+                        <p className="text-xs font-semibold text-blue-900">
+                          {showAquifers && 'Aquifers Layer'}
+                          {showGWR && 'GWR Layer'}
+                          {showGrace && 'GRACE Layer'}
+                          {showRainfall && 'Rainfall Layer'}
+                          {showWells && 'Wells Layer'}
+                          {selectedState && ` - ${selectedState}`}
+                          {selectedDistrict && ` / ${selectedDistrict}`}
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
+            ) : (
+              // No Layers Active: Full View India Map
+              <div className="h-full">
+                <IndiaMap
+                  center={[22.9734, 78.6569]}
+                  zoom={5}
+                  mapKey={0}
+                  districtGeo={null}
+                  aquifers={[]}
+                  graceData={[]}
+                  rainfallData={[]}
+                  wellsData={[]}
+                  gwrData={null}
+                  showAquifers={false}
+                  showGrace={false}
+                  showRainfall={false}
+                  showWells={false}
+                  showGWR={false}
+                />
+              </div>
+            )}
 
-            {/* Right: Zoomed Map with Selected Layer OR Advanced Module */}
-            <div className="h-full relative" style={{ zIndex: 10 }}>
-              {selectedAdvancedModule ? (
-                // Advanced Module Panel
-                <AdvancedModulePanel
-                  moduleName={getModuleName(selectedAdvancedModule)}
-                  onClose={() => setSelectedAdvancedModule('')}
+            {/* Timeseries Chart - Inline (when no split view) */}
+            {!isSplitViewActive && showTimeseries && timeseriesResponse && (
+              <div className="mt-4">
+                <div className="bg-white rounded-lg shadow-lg border border-slate-200 overflow-hidden">
+                  <div className="bg-indigo-600 text-white px-4 py-2.5 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+                      </svg>
+                      <h3 className="font-semibold text-sm">Timeseries Analysis</h3>
+                    </div>
+                    <button
+                      onClick={() => setShowTimeseries(false)}
+                      className="hover:bg-indigo-700 p-1 rounded transition-colors"
+                      title="Close"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                  <div className="p-4">
+                    <Timeseries
+                      timeseriesResponse={timeseriesResponse}
+                      timeseriesView={timeseriesView}
+                      onViewChange={setTimeseriesView}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Floating Timeseries - Only when split view is active */}
+          {isSplitViewActive && showTimeseries && timeseriesResponse && (
+            <div className={`fixed ${isSidebarExpanded ? 'left-80' : 'left-14'} right-6 bottom-6 transition-all duration-300 z-30`}>
+              {isTimeseriesMinimized ? (
+                // Minimized Badge
+                <button
+                  onClick={() => setIsTimeseriesMinimized(false)}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 rounded-lg shadow-lg flex items-center justify-center gap-2 transition-all"
                 >
-                  {renderAdvancedModuleContent()}
-                </AdvancedModulePanel>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+                  </svg>
+                  <span className="font-semibold">Show Timeseries Analysis</span>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                  </svg>
+                </button>
               ) : (
-                // Regular Layer Map (Zoomed to selected state/district)
-                <div className="h-full w-full rounded-lg overflow-hidden shadow-lg border border-blue-300 relative">
-                  <IndiaMap
-                    center={center}
-                    zoom={zoom}
-                    mapKey={mapKey}
-                    districtGeo={districtGeo}
-                    aquifers={showAquifers ? aquifers : []}
-                    graceData={showGrace ? graceData : []}
-                    rainfallData={showRainfall ? rainfallData : []}
-                    wellsData={showWells ? wellsData : []}
-                    gwrData={showGWR ? gwrData : null}
-                    showAquifers={showAquifers}
-                    showGrace={showGrace}
-                    showRainfall={showRainfall}
-                    showWells={showWells}
-                    showGWR={showGWR}
-                  />
-                  <div className="absolute top-3 left-3 bg-white px-3 py-1.5 rounded-md shadow-md border border-blue-400">
-                    <p className="text-xs font-semibold text-blue-900">
-                      {showAquifers && 'Aquifers Layer'}
-                      {showGWR && 'GWR Layer'}
-                      {showGrace && 'GRACE Layer'}
-                      {showRainfall && 'Rainfall Layer'}
-                      {showWells && 'Wells Layer'}
-                      {selectedState && ` - ${selectedState}`}
-                      {selectedDistrict && ` / ${selectedDistrict}`}
-                    </p>
+                // Expanded Panel
+                <div className="bg-white rounded-lg shadow-2xl border border-slate-200 overflow-hidden max-h-[60vh]">
+                  <div className="bg-indigo-600 text-white px-4 py-2.5 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+                      </svg>
+                      <h3 className="font-semibold text-sm">Timeseries Analysis</h3>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setIsTimeseriesMinimized(true)}
+                        className="hover:bg-indigo-700 p-1 rounded transition-colors"
+                        title="Minimize"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={() => setShowTimeseries(false)}
+                        className="hover:bg-indigo-700 p-1 rounded transition-colors"
+                        title="Close"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div className="p-4 overflow-y-auto max-h-[50vh]">
+                    <Timeseries
+                      timeseriesResponse={timeseriesResponse}
+                      timeseriesView={timeseriesView}
+                      onViewChange={setTimeseriesView}
+                    />
                   </div>
                 </div>
               )}
             </div>
-          </div>
-        ) : (
-          // No Layers Active: Full View India Map
-          <div className="h-full">
-            <IndiaMap
-              center={[22.9734, 78.6569]}
-              zoom={5}
-              mapKey={0}
-              districtGeo={null}
-              aquifers={[]}
-              graceData={[]}
-              rainfallData={[]}
-              wellsData={[]}
-              gwrData={null}
-              showAquifers={false}
-              showGrace={false}
-              showRainfall={false}
-              showWells={false}
-              showGWR={false}
-            />
-          </div>
-        )}
-
-        {/* Timeseries Chart - Inline (when no split view) */}
-        {!isSplitViewActive && showTimeseries && timeseriesResponse && (
-          <div className="mt-4">
-            <div className="bg-white rounded-lg shadow-lg border border-slate-200 overflow-hidden">
-              <div className="bg-indigo-600 text-white px-4 py-2.5 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
-                  </svg>
-                  <h3 className="font-semibold text-sm">Timeseries Analysis</h3>
-                </div>
-                <button
-                  onClick={() => setShowTimeseries(false)}
-                  className="hover:bg-indigo-700 p-1 rounded transition-colors"
-                  title="Close"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-              <div className="p-4">
-                <Timeseries
-                  timeseriesResponse={timeseriesResponse}
-                  timeseriesView={timeseriesView}
-                  onViewChange={setTimeseriesView}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Floating Timeseries - Only when split view is active */}
-      {isSplitViewActive && showTimeseries && timeseriesResponse && (
-        <div className={`fixed ${isSidebarExpanded ? 'left-80' : 'left-14'} right-6 bottom-6 transition-all duration-300 z-30`}>
-          {isTimeseriesMinimized ? (
-            // Minimized Badge
-            <button
-              onClick={() => setIsTimeseriesMinimized(false)}
-              className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 rounded-lg shadow-lg flex items-center justify-center gap-2 transition-all"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
-              </svg>
-              <span className="font-semibold">Show Timeseries Analysis</span>
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-              </svg>
-            </button>
-          ) : (
-            // Expanded Panel
-            <div className="bg-white rounded-lg shadow-2xl border border-slate-200 overflow-hidden max-h-[60vh]">
-              <div className="bg-indigo-600 text-white px-4 py-2.5 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
-                  </svg>
-                  <h3 className="font-semibold text-sm">Timeseries Analysis</h3>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setIsTimeseriesMinimized(true)}
-                    className="hover:bg-indigo-700 p-1 rounded transition-colors"
-                    title="Minimize"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={() => setShowTimeseries(false)}
-                    className="hover:bg-indigo-700 p-1 rounded transition-colors"
-                    title="Close"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-              <div className="p-4 overflow-y-auto max-h-[50vh]">
-                <Timeseries
-                  timeseriesResponse={timeseriesResponse}
-                  timeseriesView={timeseriesView}
-                  onViewChange={setTimeseriesView}
-                />
-              </div>
-            </div>
           )}
-        </div>
-      )}
-      {/* Storage vs GWR Chart - Floating Panel */}
-      {showStorageVsGWR && storageVsGwrData && (
-        <div className={`fixed ${isSidebarExpanded ? 'left-80' : 'left-14'} bottom-6 transition-all duration-300 z-30 ${isStorageVsGWRMinimized ? 'w-auto' : 'right-6'}`}>
-          {isStorageVsGWRMinimized ? (
-            // Minimized Badge
-            <button
-              onClick={() => setIsStorageVsGWRMinimized(false)}
-              className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 transition-all"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-              </svg>
-              <span className="font-medium text-sm">Storage vs GWR</span>
-            </button>
-          ) : (
-            // Expanded Panel
-            <div className="bg-white rounded-lg shadow-2xl border border-slate-300 overflow-hidden">
-              <div className="bg-purple-600 text-white px-4 py-2.5 flex items-center justify-between">
-                <div className="flex items-center gap-2">
+          {/* Storage vs GWR Chart - Floating Panel */}
+          {showStorageVsGWR && storageVsGwrData && (
+            <div className={`fixed ${isSidebarExpanded ? 'left-80' : 'left-14'} bottom-6 transition-all duration-300 z-30 ${isStorageVsGWRMinimized ? 'w-auto' : 'right-6'}`}>
+              {isStorageVsGWRMinimized ? (
+                // Minimized Badge
+                <button
+                  onClick={() => setIsStorageVsGWRMinimized(false)}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 transition-all"
+                >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                   </svg>
-                  <h3 className="font-semibold text-sm">Storage vs GWR Comparison</h3>
+                  <span className="font-medium text-sm">Storage vs GWR</span>
+                </button>
+              ) : (
+                // Expanded Panel
+                <div className="bg-white rounded-lg shadow-2xl border border-slate-300 overflow-hidden">
+                  <div className="bg-purple-600 text-white px-4 py-2.5 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                      </svg>
+                      <h3 className="font-semibold text-sm">Storage vs GWR Comparison</h3>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setIsStorageVsGWRMinimized(true)}
+                        className="hover:bg-purple-700 p-1 rounded transition-colors"
+                        title="Minimize"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={() => setShowStorageVsGWR(false)}
+                        className="hover:bg-purple-700 p-1 rounded transition-colors"
+                        title="Close"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div className="p-4 max-h-96 overflow-y-auto">
+                    <StorageVsGWR storageVsGwrData={storageVsGwrData} />
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setIsStorageVsGWRMinimized(true)}
-                    className="hover:bg-purple-700 p-1 rounded transition-colors"
-                    title="Minimize"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={() => setShowStorageVsGWR(false)}
-                    className="hover:bg-purple-700 p-1 rounded transition-colors"
-                    title="Close"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-              <div className="p-4 max-h-96 overflow-y-auto">
-                <StorageVsGWR storageVsGwrData={storageVsGwrData} />
-              </div>
+              )}
             </div>
           )}
-        </div>
+
+          {/* ChatBot - Positioned at bottom right */}
+          <ChatBot
+            isOpen={isChatOpen}
+            onClose={() => setIsChatOpen(false)}
+            mapContext={mapContext}
+            backendURL={BACKEND_URL}
+            selectedAdvancedModule={selectedAdvancedModule}
+          />
+
+          {/* Loading Spinner */}
+          {isLoading && <LoadingSpinner />}
+        </>
       )}
-
-      {/* ChatBot - Positioned at bottom right */}
-      <ChatBot
-        isOpen={isChatOpen}
-        onClose={() => setIsChatOpen(false)}
-        mapContext={mapContext}
-        backendURL={BACKEND_URL}
-        selectedAdvancedModule={selectedAdvancedModule}
-      />
-
-      {/* Loading Spinner */}
-      {isLoading && <LoadingSpinner />}
     </div>
   );
 }

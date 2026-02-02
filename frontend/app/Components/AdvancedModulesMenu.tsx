@@ -14,16 +14,16 @@ export default function AdvancedModulesMenu({
     selectedModule,
 }: AdvancedModulesMenuProps) {
     const modules = [
-        { id: 'ASI', name: 'Aquifer Stress Index', icon: '📊', color: '#8B5CF6', description: 'Analyze aquifer stress levels' },
-        { id: 'NETWORK_DENSITY', name: 'Network Density', icon: '🕸️', color: '#EC4899', description: 'Well network distribution analysis' },
-        { id: 'SASS', name: 'SASS Analysis', icon: '🎯', color: '#F59E0B', description: 'Spatiotemporal stress assessment' },
-        { id: 'GRACE_DIVERGENCE', name: 'GRACE Divergence', icon: '📈', color: '#10B981', description: 'Storage anomaly detection' },
-        { id: 'FORECAST', name: 'GW Forecast', icon: '🔮', color: '#3B82F6', description: 'Groundwater level predictions' },
-        { id: 'RECHARGE', name: 'Recharge Planning', icon: '💧', color: '#06B6D4', description: 'Optimal recharge strategies' },
-        { id: 'SIGNIFICANT_TRENDS', name: 'Trend Analysis', icon: '📉', color: '#EF4444', description: 'Significant trend detection' },
-        { id: 'CHANGEPOINTS', name: 'Changepoints', icon: '⚡', color: '#F97316', description: 'Identify regime shifts' },
-        { id: 'LAG_CORRELATION', name: 'Lag Correlation', icon: '🔄', color: '#84CC16', description: 'Temporal correlation analysis' },
-        { id: 'HOTSPOTS', name: 'Hotspots', icon: '🔥', color: '#DC2626', description: 'Critical zones identification' },
+        { id: 'ASI', name: 'Aquifer Stress Index', color: '#8B5CF6', description: 'Analyze aquifer stress levels' },
+        { id: 'NETWORK_DENSITY', name: 'Network Density', color: '#EC4899', description: 'Well network distribution analysis' },
+        { id: 'SASS', name: 'SASS Analysis', color: '#F59E0B', description: 'Spatiotemporal stress assessment' },
+        { id: 'GRACE_DIVERGENCE', name: 'GRACE Divergence', color: '#10B981', description: 'Storage anomaly detection' },
+        { id: 'FORECAST', name: 'GW Forecast', color: '#3B82F6', description: 'Groundwater level predictions' },
+        { id: 'RECHARGE', name: 'Recharge Planning', color: '#06B6D4', description: 'Optimal recharge strategies' },
+        { id: 'SIGNIFICANT_TRENDS', name: 'Trend Analysis', color: '#EF4444', description: 'Significant trend detection' },
+        { id: 'CHANGEPOINTS', name: 'Changepoints', color: '#F97316', description: 'Identify regime shifts' },
+        { id: 'LAG_CORRELATION', name: 'Lag Correlation', color: '#84CC16', description: 'Temporal correlation analysis' },
+        { id: 'HOTSPOTS', name: 'Hotspots', color: '#DC2626', description: 'Critical zones identification' },
     ];
 
     if (!isOpen) return null;
@@ -35,9 +35,8 @@ export default function AdvancedModulesMenu({
                 <div className="p-6">
                     {/* Header */}
                     <div className="flex items-center justify-between mb-6">
-                        <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                            <span>⚙️</span>
-                            <span>Advanced Modules</span>
+                        <h2 className="text-2xl font-bold text-gray-800">
+                            Advanced Analytics
                         </h2>
                         <button
                             onClick={onClose}
@@ -79,11 +78,9 @@ export default function AdvancedModulesMenu({
                             >
                                 <div className="flex items-start gap-3">
                                     <div
-                                        className="w-12 h-12 rounded-lg flex items-center justify-center text-2xl shadow-md"
-                                        style={{ backgroundColor: module.color + '20' }}
-                                    >
-                                        {module.icon}
-                                    </div>
+                                        className="w-3 h-3 rounded-full shadow-sm"
+                                        style={{ backgroundColor: module.color }}
+                                    ></div>
                                     <div className="flex-1">
                                         <h3 className="font-bold text-gray-900 mb-1">{module.name}</h3>
                                         <p className="text-xs text-gray-600">{module.description}</p>
@@ -101,7 +98,7 @@ export default function AdvancedModulesMenu({
                     {/* Info Footer */}
                     <div className="mt-6 p-4 bg-gray-50 rounded-lg border-2 border-gray-200">
                         <p className="text-xs text-gray-600">
-                            💡 <strong>Tip:</strong> Select a module to view advanced analytics in split-screen mode alongside the India map.
+                            <strong>Tip:</strong> Select a module to view advanced analytics in split-screen mode alongside the India map.
                         </p>
                     </div>
                 </div>

@@ -17,9 +17,8 @@ export default function AdvancedModulePanel({
         <div className="h-full w-full bg-white rounded-lg overflow-hidden shadow-xl border-2 border-blue-300 flex flex-col">
             {/* Header */}
             <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white p-4 flex items-center justify-between flex-shrink-0">
-                <h2 className="text-xl font-bold flex items-center gap-2">
-                    <span>⚙️</span>
-                    <span>{moduleName}</span>
+                <h2 className="text-xl font-bold">
+                    {moduleName}
                 </h2>
                 <button
                     onClick={onClose}
