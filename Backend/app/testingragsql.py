@@ -176,11 +176,12 @@ def get_boundary_geojson(conn, state: str, district: str = None):
         return None
     
     result = conn.execute(query, params).fetchone()
-    if result:
+    if result and result[0]:
         logger.debug(f"Boundary GeoJSON retrieved successfully (length: {len(result[0])})")
+        return result[0]
     else:
         logger.warning(f"No boundary found for state={state}, district={district}")
-    return result[0] if result else None
+        return None
 
 def get_month_day_range(year: int, month: int):
     """Get day-of-year range for a given month"""
@@ -505,17 +506,53 @@ def get_aquifer_properties(state: str, district: str = None) -> str:
     """
     logger.info(f"TOOL CALLED: get_aquifer_properties(state='{state}', district='{district}')")
     
-    # Clean inputs
+    # ✅ STEP 1: Parse JSON string input
+    if isinstance(state, str) and state.strip().startswith('{'):
+        logger.debug("Input is JSON string, parsing...")
+        try:
+            # Extract only the first JSON object, ignore anything after
+            state_str = state.strip()
+            # Find the closing brace of the first JSON object
+            brace_count = 0
+            end_idx = 0
+            for i, char in enumerate(state_str):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i + 1
+                        break
+            
+            if end_idx > 0:
+                json_str = state_str[:end_idx]
+                parsed = json.loads(json_str)
+                if isinstance(parsed, dict):
+                    district = parsed.get('district', district)
+                    state = parsed.get('state', '')
+                    logger.debug(f"Parsed JSON: state='{state}', district='{district}'")
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"Failed to parse JSON: {e}")
+    # ✅ STEP 2: Parse kwargs-style string input
+    elif isinstance(state, str) and '=' in state:
+        logger.debug("Input is string with '=', parsing...")
+        parsed = parse_agent_input(state)
+        if parsed:
+            state = parsed.get('state', '')
+            district = parsed.get('district', district)
+            logger.debug(f"Parsed kwargs: state='{state}', district='{district}'")
+    # ✅ STEP 3: Handle dictionary input
+    elif isinstance(state, dict):
+        logger.debug("Input is dictionary, extracting values...")
+        district = state.get('district', district)
+        state = state.get('state', '')
+        logger.debug(f"Extracted: state='{state}', district='{district}'")
+    
+    # Rest of the function stays the same...
     if state:
         state = str(state).strip().strip('"').strip("'").strip()
-        # Remove parameter prefix if present
-        if state.startswith('state='):
-            state = state[6:].strip().strip('"').strip("'").strip()
-    
     if district:
-        district = str(district).strip().strip('"').strip("'").strip()
-        if district.startswith('district='):
-            district = district[9:].strip().strip('"').strip("'").strip()
+        district = str(district).strip().strip('"').strip("'").strip() if district else None
     
     if not state or state.lower() in ['none', 'null', '']:
         logger.warning("No valid state provided")
@@ -646,17 +683,43 @@ def get_groundwater_wells_summary(state: str, district: str = None, year: int = 
     """
     logger.info(f"TOOL CALLED: get_groundwater_wells_summary(state='{state}', district='{district}', year={year})")
     
-    # ✅ STEP 1: Parse if input is a string like 'state="Maharashtra", year=2015'
-    if isinstance(state, str) and '=' in state:
+    # ✅ STEP 1: Parse JSON string input
+    if isinstance(state, str) and state.strip().startswith('{'):
+        logger.debug("Input is JSON string, parsing...")
+        try:
+            # Extract only the first JSON object
+            state_str = state.strip()
+            brace_count = 0
+            end_idx = 0
+            for i, char in enumerate(state_str):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i + 1
+                        break
+            
+            if end_idx > 0:
+                json_str = state_str[:end_idx]
+                parsed = json.loads(json_str)
+                if isinstance(parsed, dict):
+                    district = parsed.get('district', district)
+                    year = parsed.get('year', year)
+                    state = parsed.get('state', '')
+                    logger.debug(f"Parsed JSON: state='{state}', district='{district}', year={year}")
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"Failed to parse JSON: {e}")
+    # ✅ STEP 2: Parse kwargs-style string input
+    elif isinstance(state, str) and '=' in state:
         logger.debug("Input is string with '=', parsing...")
         parsed = parse_agent_input(state)
         if parsed:
             state = parsed.get('state', '')
             district = parsed.get('district', district)
             year = parsed.get('year', year)
-            logger.debug(f"Parsed to: state='{state}', district='{district}', year={year}")
-    
-    # ✅ STEP 2: Handle dictionary input
+            logger.debug(f"Parsed kwargs: state='{state}', district='{district}', year={year}")
+    # ✅ STEP 3: Handle dictionary input
     elif isinstance(state, dict):
         logger.debug("Input is dictionary, extracting values...")
         district = state.get('district', district)
@@ -795,18 +858,45 @@ def get_grace_data(state: str, district: str = None, year: int = None, month: in
     """
     logger.info(f"TOOL CALLED: get_grace_data(state='{state}', district='{district}', year={year}, month={month})")
     
-    # ✅ STEP 1: Parse if input is a string like 'state="Maharashtra", year=2015'
-    if isinstance(state, str) and '=' in state:
-        logger.debug("Parsing string input...")
+    # ✅ STEP 1: Parse JSON string input
+    if isinstance(state, str) and state.strip().startswith('{'):
+        logger.debug("Parsing JSON string input...")
+        try:
+            # Extract only the first JSON object, ignore anything after
+            state_str = state.strip()
+            brace_count = 0
+            end_idx = 0
+            for i, char in enumerate(state_str):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i + 1
+                        break
+            
+            if end_idx > 0:
+                json_str = state_str[:end_idx]
+                parsed = json.loads(json_str)
+                if isinstance(parsed, dict):
+                    district = parsed.get('district', district)
+                    year = parsed.get('year', year)
+                    month = parsed.get('month', month)
+                    state = parsed.get('state', '')
+                    logger.debug(f"Parsed JSON: state={state}, district={district}, year={year}, month={month}")
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"Failed to parse JSON: {e}")
+    # ✅ STEP 2: Parse kwargs-style string input
+    elif isinstance(state, str) and '=' in state:
+        logger.debug("Parsing kwargs string input...")
         parsed = parse_agent_input(state)
         if parsed:
             state = parsed.get('state', '')
             district = parsed.get('district', district)
             year = parsed.get('year', year)
             month = parsed.get('month', month)
-            logger.debug(f"Parsed: state={state}, district={district}, year={year}, month={month}")
-    
-    # ✅ STEP 2: Handle dictionary input
+            logger.debug(f"Parsed kwargs: state={state}, district={district}, year={year}, month={month}")
+    # ✅ STEP 3: Handle dictionary input
     elif isinstance(state, dict):
         logger.debug("Extracting from dictionary...")
         district = state.get('district', district)
@@ -926,9 +1016,36 @@ def get_rainfall_data(state: str, district: str = None, year: int = None, month:
     """Get rainfall statistics."""
     logger.info(f"TOOL CALLED: get_rainfall_data(state='{state}', district='{district}', year={year}, month={month})")
     
-    # ✅ STEP 1: Parse if input is a string
-    if isinstance(state, str) and '=' in state:
-        logger.debug("Parsing string input...")
+    # ✅ STEP 1: Parse JSON string input
+    if isinstance(state, str) and state.strip().startswith('{'):
+        logger.debug("Parsing JSON string input...")
+        try:
+            # Extract only the first JSON object
+            state_str = state.strip()
+            brace_count = 0
+            end_idx = 0
+            for i, char in enumerate(state_str):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i + 1
+                        break
+            
+            if end_idx > 0:
+                json_str = state_str[:end_idx]
+                parsed = json.loads(json_str)
+                if isinstance(parsed, dict):
+                    district = parsed.get('district', district)
+                    year = parsed.get('year', year)
+                    month = parsed.get('month', month)
+                    state = parsed.get('state', '')
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"Failed to parse JSON: {e}")
+    # ✅ STEP 2: Parse kwargs-style string input
+    elif isinstance(state, str) and '=' in state:
+        logger.debug("Parsing kwargs string input...")
         parsed = parse_agent_input(state)
         if parsed:
             state = parsed.get('state', '')
@@ -1307,7 +1424,7 @@ def analyze_simple(df, location):
             
             # Year-by-year pattern (top 5 years)
             response.append(f"\n   YEAR-BY-YEAR PATTERN:")
-            yearly_data = series.resample('Y').mean()
+            yearly_data = series.resample('YE').mean()
             
             for i in range(min(5, len(yearly_data))):
                 year = yearly_data.index[i].year
@@ -1379,7 +1496,7 @@ def analyze_simple(df, location):
         series = df_copy['avg_rainfall']
         
         # Calculate annual totals
-        yearly = series.resample('Y').sum()
+        yearly = series.resample('YE').sum()
         
         response.append(f"   Average Annual: {yearly.mean():.0f}mm")
         response.append(f"   Wettest Year: {yearly.max():.0f}mm ({yearly.idxmax().year})")
@@ -1433,7 +1550,7 @@ def analyze_simple(df, location):
             gwl_slope_per_year = gwl_slope * 12
             
             # Rainfall trend
-            yearly_rain = rain_series.resample('Y').sum()
+            yearly_rain = rain_series.resample('YE').sum()
             if len(yearly_rain) >= 6:
                 recent_rain = yearly_rain.tail(3).mean()
                 older_rain = yearly_rain.head(3).mean()
@@ -1522,14 +1639,38 @@ def get_timeseries_analysis(state: str, district: str = None) -> str:
     """
     logger.info(f"TOOL CALLED: get_timeseries_analysis(state='{state}', district='{district}')")
     
-    # Parse string input
-    if isinstance(state, str) and '=' in state:
-        logger.debug("Parsing string input...")
+    # Parse JSON string input
+    if isinstance(state, str) and state.strip().startswith('{'):
+        logger.debug("Parsing JSON string input...")
+        try:
+            # Extract only the first JSON object
+            state_str = state.strip()
+            brace_count = 0
+            end_idx = 0
+            for i, char in enumerate(state_str):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i + 1
+                        break
+            
+            if end_idx > 0:
+                json_str = state_str[:end_idx]
+                parsed = json.loads(json_str)
+                if isinstance(parsed, dict):
+                    district = parsed.get('district', district)
+                    state = parsed.get('state', '')
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"Failed to parse JSON: {e}")
+    # Parse kwargs-style string input
+    elif isinstance(state, str) and '=' in state:
+        logger.debug("Parsing kwargs string input...")
         parsed = parse_agent_input(state)
         if parsed:
             state = parsed.get('state', '')
             district = parsed.get('district', district)
-    
     # Handle dictionary input
     elif isinstance(state, dict):
         logger.debug("Extracting from dictionary input...")
@@ -2365,12 +2506,12 @@ logger.info(" Initializing LLM...")
 print("🤖 Initializing LLM...")
 
 llm = ChatOllama(
-    model="gemma3:12b",
+    model="granite3.3:8b",
     temperature=0,
     keep_alive="10m",
     num_ctx=8192
 )
-logger.debug("LLM initialized with model=gemma3:12b")
+logger.debug("LLM initialized with model=granite3.3:8b")
 
 agent_prompt = PromptTemplate.from_template("""
 You are a hydrogeology expert assistant for groundwater analysis in India.
@@ -2475,17 +2616,75 @@ Example:
 Thought: The module_context shows ASI data for Maharashtra. The mean ASI score of 3.2 is displayed, so I can explain this directly.
 Final Answer: The Aquifer Suitability Index (ASI) for Maharashtra is **3.2 out of 5.0**, which is rated as **Good**. This indicates favorable conditions for groundwater storage and transmission. About 45% of the aquifers show high suitability, with alluvium being the dominant aquifer type (average specific yield of 0.08). This suggests Maharashtra has reasonably good potential for sustainable groundwater development across its 307,713 km² area.
 
-**FORMAT B: When using a tool:**
+**FORMAT B: When using a tool (ONE TOOL ONLY):**
 
 Thought: [Why I need to use a tool - e.g., different location, need definition, context insufficient, etc.]
 Action: [tool_name]
-Action Input: state="StateName", district="DistrictName", year=2023
+Action Input: {{"state": "StateName", "year": 2023}}
 
-**CRITICAL FORMAT RULE**: 
-✅ CORRECT: state="Maharashtra", year=2015, month=6
-❌ WRONG: {{'state': 'Maharashtra', 'year': 2015}}
+[WAIT FOR OBSERVATION]
 
-After receiving ONE tool observation, immediately provide Final Answer with interpretation.
+Observation: [Tool will return data here - YOU MUST WAIT FOR THIS]
+
+Thought: [Brief analysis of what the observation shows]
+Final Answer: [Interpret the observation for the user in a clear, friendly way]
+
+**ACTION FORMAT REQUIREMENTS**:
+- The `Action:` line must contain ONLY the tool name (no arguments).
+- The `Action Input:` line must be a valid JSON object with the parameters.
+- NEVER write `Action: tool_name(state="X")`.
+- Use JSON format: {{"state": "Maharashtra", "year": 2023}}
+- **DO NOT include `month` unless user explicitly asks for a specific month** (e.g., "June 2023" or "month 6").
+- **If user only mentions a year, DO NOT add month parameter** - let the tool return annual data.
+
+**CRITICAL RULES**:
+✅ Write ONE Action/Action Input pair, then STOP and WAIT
+✅ After you see "Observation:", write Thought + Final Answer
+✅ NEVER write a second Action after receiving an Observation
+✅ If a tool returns an error, explain it in Final Answer (don't retry)
+
+**CORRECT EXAMPLE:**
+```
+Thought: User asks about Kerala which is different from current context. I need get_grace_data.
+Action: get_grace_data
+Action Input: {{"state": "Kerala", "year": 2023}}
+```
+[SYSTEM PROVIDES OBSERVATION HERE]
+```
+Observation: GRACE REPORT: KERALA...Average TWS: 4.57 cm...Status: POSITIVE
+Thought: The observation shows Kerala has positive water storage in 2023.
+Final Answer: Kerala shows positive groundwater storage in 2023! The GRACE satellite data indicates an average Terrestrial Water Storage of 4.57 cm, which means the region has more water than the baseline. This is a good sign for water availability.
+```
+
+**WRONG EXAMPLES:**
+❌ Writing multiple Actions:
+```
+Action: get_grace_data
+Action Input: {{"state": "Kerala", "year": 2023}}
+Action: get_grace_data
+Action Input: {{"state": "Kerala", "year": 2024}}
+```
+
+❌ Not waiting for Observation:
+```
+Action: get_grace_data
+Action Input: {{"state": "Kerala", "year": 2023}}
+Thought: I'll now get 2024 data...
+Action: get_grace_data
+```
+
+❌ Continuing after error:
+```
+Observation: ERROR: No data found
+Thought: Let me try again...
+Action: get_grace_data
+```
+Should be:
+```
+Observation: ERROR: No data found
+Thought: The tool couldn't find data for this location/year.
+Final Answer: I wasn't able to retrieve GRACE data for that combination. This might mean data isn't available for that year. Would you like to try a different year?
+```
 
 **FORMAT C: Simple conversational questions (greetings, etc.):**
 
@@ -2504,7 +2703,10 @@ Final Answer: Hello! I'm your groundwater analysis assistant. I can help you und
 3. **Explain technical numbers** - don't just state them (e.g., "3.2/5.0 means Good aquifer potential")
 4. **Be conversational** - avoid jargon, use clear language
 5. **Call ONE tool maximum**, then answer immediately
-6. **If context is insufficient**, acknowledge it and use the appropriate tool
+6. **Never loop on tool errors** — if a tool fails or returns nothing, provide a best-effort answer and ask for clarification in the Final Answer.
+7. **If the user requests multiple years/locations**, ask them to choose one (or pick the latest year and say you can fetch the other next).
+8. **Only include `month` when explicitly requested**; otherwise return annual results for the year.
+9. **If context is insufficient**, acknowledge it and use the appropriate tool
 
 ═══════════════════════════════════════════════════════════════════
 
@@ -2647,7 +2849,7 @@ def get_agent_executor():
     ]
     
     llm = ChatOllama(
-        model="gemma3:12b",
+        model="granite3.3:8b",
         temperature=0,
         keep_alive="10m",
         num_ctx=8192
@@ -2718,13 +2920,52 @@ Tool names: [{tool_names}]
 Thought: The module_context has [description]. I can answer directly.
 Final Answer: [Clear explanation of context data]
 
-**When using a tool:**
+**When using a tool (ONE TOOL ONLY):**
 Thought: [Why I need a tool]
 Action: [tool_name]
-Action Input: state="StateName", year=2023
+Action Input: {{"state": "StateName", "year": 2023}}
 
-**CRITICAL**: Use format state="Maharashtra", year=2015
-NOT: {{'state': 'Maharashtra', 'year': 2015}}
+[WAIT FOR OBSERVATION - Do not write anything more until you see "Observation:"]
+
+Observation: [Tool output will appear here]
+
+Thought: [Brief analysis of the observation]
+Final Answer: [Interpret the observation for the user]
+
+**ACTION FORMAT REQUIREMENTS**:
+- The `Action:` line must contain ONLY the tool name (no arguments).
+- The `Action Input:` line must be a valid JSON object with the parameters.
+- NEVER write `Action: tool_name(state="X")`.
+- Use JSON format: {{"state": "Maharashtra", "year": 2023}}
+- **DO NOT include `month` unless user explicitly asks for a specific month** (e.g., "June 2023" or "month 6").
+- **If user only mentions a year, DO NOT add month parameter** - let the tool return annual data.
+
+**CRITICAL RULES**:
+✅ Write ONE Action/Action Input, then STOP
+✅ WAIT for "Observation:" to appear
+✅ After Observation, write: Thought + Final Answer
+✅ NEVER write a second Action after Observation
+✅ If error in Observation, explain in Final Answer (don't retry)
+
+**CORRECT FLOW:**
+```
+Thought: Need data for different location
+Action: get_grace_data
+Action Input: {{"state": "Kerala", "year": 2023}}
+```
+[STOP HERE - WAIT FOR OBSERVATION]
+```
+Observation: GRACE REPORT...
+Thought: Data shows positive storage
+Final Answer: [interpretation]
+```
+
+**WRONG - DO NOT DO THIS:**
+```
+Action: get_grace_data
+Action Input: {{"state": "Kerala", "year": 2023}}
+Action: get_grace_data  ← WRONG! Second action!
+```
 
 **For greetings/conversational:**
 Final Answer: [Direct friendly response]
@@ -2737,8 +2978,12 @@ Final Answer: [Direct friendly response]
 2. Use context data when available for current location
 3. Explain numbers conversationally (e.g., "3.2/5.0 means Good")
 4. Call ONE tool max, then answer
-5. Be friendly and avoid jargon
-6. If context is insufficient, refer user to the specific dashboard module
+5. Never loop on tool errors — if a tool fails or returns nothing, provide a best-effort answer and ask for clarification in the Final Answer
+7. **If the user requests multiple years/locations**, ask them to choose one (or pick the latest year and say you can fetch the other next)
+8. **Only include `month` when explicitly requested**; otherwise return annual results for the year
+9. **CRITICAL: After calling ONE tool and receiving its observation, immediately provide Final Answer. NEVER call a second tool.**
+10. Be friendly and avoid jargon
+11. If context is insufficient, refer user to the specific dashboard module
 
 ═══════════════════════════════════════════════════════════════════
 
@@ -2894,6 +3139,7 @@ def main():
             print("="*70 + "\n")
             
             logger.info("Response delivered successfully")
+        
         except Exception as e:
             logger.error(f"Error in main loop: {e}", exc_info=True)
             print(f"\n❌ Error: {e}\n")
